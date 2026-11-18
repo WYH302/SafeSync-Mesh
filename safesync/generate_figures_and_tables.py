@@ -35,24 +35,24 @@ DELIVERY_FIG_DIR = PUB_ROOT / "paper_delivery" / "figures"
 for d in [FIG_DIR, PAPER_DIR, PAPER_FIG_DIR, DELIVERY_FIG_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
-# IEEE TGRS Publication Matplotlib Styling (Okabe-Ito Colorblind-Safe Palette)
+# IEEE TGRS Publication Matplotlib Styling (Uniform 11.4-in Base -> 7.16-in \textwidth)
 plt.rcParams.update({
     "font.family": "serif",
     "font.serif": ["Times New Roman", "STIXGeneral", "DejaVu Serif"],
     "mathtext.fontset": "stix",
-    "font.size": 9.5,
-    "axes.labelsize": 10.0,
-    "axes.titlesize": 10.0,
-    "xtick.labelsize": 8.5,
-    "ytick.labelsize": 8.5,
-    "legend.fontsize": 8.0,
-    "figure.titlesize": 10.5,
+    "font.size": 10.4,
+    "axes.labelsize": 10.5,
+    "axes.titlesize": 10.6,
+    "xtick.labelsize": 9.2,
+    "ytick.labelsize": 9.2,
+    "legend.fontsize": 8.2,
+    "figure.titlesize": 11.0,
     "pdf.fonttype": 42,
     "ps.fonttype": 42,
-    "axes.linewidth": 0.8,
+    "axes.linewidth": 0.85,
     "grid.linewidth": 0.5,
-    "lines.linewidth": 1.8,
-    "lines.markersize": 5.5,
+    "lines.linewidth": 1.85,
+    "lines.markersize": 5.4,
 })
 
 METHOD_LABELS = {
@@ -182,15 +182,15 @@ def plot_fig1_architecture(res: Dict) -> None:
             elif k_grid[rr, cc]:
                 fused_thumb[r0:r1, c0:c1] = np.array([20, 184, 130], dtype=np.uint8)
 
-    fig = plt.figure(figsize=(13.2, 6.15), facecolor="#FFFFFF")
+    fig = plt.figure(figsize=(11.4, 5.15), facecolor="#FFFFFF")
     ax = fig.add_axes([0.0, 0.0, 1.0, 1.0], facecolor="#FFFFFF")
     ax.set_xlim(0, 132)
     ax.set_ylim(-11.8, 49.5)
     ax.axis("off")
 
-    def ctext(x, y, s, size=8.2, bold=False, color="#1E293B", ha="center", va="center", z=8, linespacing=1.18, bbox=None):
+    def ctext(x, y, s, size=8.2, bold=False, color="#1E293B", ha="center", va="center", z=8, linespacing=1.16, bbox=None):
         return ax.text(
-            x, y, s, ha=ha, va=va, fontsize=size, color=color,
+            x, y, s, ha=ha, va=va, fontsize=size * 0.94, color=color,
             fontproperties=(fp_bold if bold else fp_reg),
             zorder=z, linespacing=linespacing, bbox=bbox
         )
@@ -276,9 +276,9 @@ def plot_fig1_architecture(res: Dict) -> None:
     draw_sat_icon(6.6, 34.7, scale=1.05, angle_deg=-20.0, body_c="#334155", panel_c="#2563EB", z=6)
     cone = Polygon([(6.6, 34.0), (3.4, 26.2), (10.6, 26.2)], closed=True, facecolor="#38BDF8", alpha=0.22, zorder=5)
     ax.add_patch(cone)
-    ax.imshow(post_thumb, extent=(3.4, 10.6, 25.4, 31.8), aspect="auto", zorder=6)
-    ax.add_patch(Rectangle((3.4, 25.4), 7.2, 6.4, fill=False, edgecolor="#EF4444", lw=1.2, zorder=7))
-    ctext(7.0, 24.85, "Disaster $X_t$", size=6.6, bold=True, color="#B91C1C")
+    ax.imshow(post_thumb, extent=(3.4, 10.6, 26.0, 32.1), aspect="auto", zorder=6)
+    ax.add_patch(Rectangle((3.4, 26.0), 7.2, 6.1, fill=False, edgecolor="#EF4444", lw=1.2, zorder=7))
+    ctext(7.0, 25.15, "Disaster $X_t$", size=6.6, bold=True, color="#B91C1C")
 
     # 10x10 vivid discrete VQ token mosaic (representing 32x32, K=512)
     rng_vq = np.random.default_rng(42)
@@ -305,7 +305,7 @@ def plot_fig1_architecture(res: Dict) -> None:
     ctext(6.9, 10.3, "Prior $X_{t-1}$", size=6.6, bold=True, color="#475569")
     ctext(
         17.3, 15.1,
-        "Georef Align\n$\\bar{M}_{t-1} = A_t(M_{t-1})$\n- Prior $\\bar{z}_{t-1,k}$\n- Confidence $q_{t-1}$\n- State Age $a_{t-1}$",
+        "Georef Align\n$\\overline{M}_{t-1} = A_t(M_{t-1})$\n- Prior $\\overline{z}_{t-1,k}$\n- Confidence $q_{t-1}$\n- State Age $a_{t-1}$",
         size=6.8, color="#1E293B", linespacing=1.18
     )
     rks_badge = FancyBboxPatch((3.4, 5.1), 19.8, 3.6, boxstyle="round,pad=0.12,rounding_size=0.7",
@@ -460,7 +460,7 @@ def plot_fig1_architecture(res: Dict) -> None:
         (2.4, 20.5, "128-bit Header (4.9%)", "'SSYN' | root_id | CRC32", "#FCE7F3", "#BE185D"),
         (23.6, 30.0, "Spatial Mask $b_{\\mathrm{mask}}$ (32.6%)", "Compressed Grid Mask (846 b)", "#FEF3C7", "#B45309"),
         (54.3, 19.5, "Safety Meta $b_{\\mathrm{safe}}$ (6.6%)", "$S_{\\mathrm{safe}}$ Flags & Risk (172 b)", "#FFEDD5", "#C2410C"),
-        (74.5, 34.5, "Conditional Prefix VQ Payload $b_{\\mathrm{tok}}$ (55.8%)", "$P_\\omega(z_{t,k} \\mid \\bar{z}_{t-1,k}, c_k)$ Indices (1,446 b, 182.9 tok)", "#DBEAFE", "#1D4ED8"),
+        (74.5, 34.5, "Conditional Prefix VQ Payload $b_{\\mathrm{tok}}$ (55.8%)", "$P_\\omega(z_{t,k} \\mid \\overline{z}_{t-1,k}, c_k)$ Indices (1,446 b, 182.9 tok)", "#DBEAFE", "#1D4ED8"),
         (109.7, 19.9, "64-bit RKS Handshake", "32b Bloom | 16b Digest | 16b Age", "#EDE9FE", "#6D28D9"),
     ]
     for bx, bw, btitle, bsub, bfc, bec in segments:
@@ -484,7 +484,7 @@ def plot_fig2_pareto(res: Dict) -> None:
     curves = agg["budget_sweep"]
     full_ref = agg["full_feature_reference"]
 
-    fig, axes = plt.subplots(1, 3, figsize=(11.4, 3.55))
+    fig, axes = plt.subplots(1, 3, figsize=(11.4, 3.15))
     plot_order = [
         "current_top_k",
         "stars_adapted",
@@ -524,15 +524,15 @@ def plot_fig2_pareto(res: Dict) -> None:
 
     axes[0].set_xlabel("Application Downlink Rate $R_t$ (kb/frame)")
     axes[0].set_ylabel("Known-Task Mixed F1 (%) $\\uparrow$")
-    axes[0].set_title("(a) Known-Task Utility vs. Rate", fontweight="bold", fontsize=9.2, pad=6)
+    axes[0].set_title("(a) Known-Task Utility vs. Rate", fontweight="bold", fontsize=9.8, pad=6)
 
     axes[1].set_xlabel("Application Downlink Rate $R_t$ (kb/frame)")
     axes[1].set_ylabel("Open-World Sync-F1 (%) $\\uparrow$")
-    axes[1].set_title("(b) All-Class Sync-F1 vs. Rate", fontweight="bold", fontsize=9.2, pad=6)
+    axes[1].set_title("(b) All-Class Sync-F1 vs. Rate", fontweight="bold", fontsize=9.8, pad=6)
 
     axes[2].set_xlabel("Application Downlink Rate $R_t$ (kb/frame)")
     axes[2].set_ylabel("State Distortion $D_{\\mathrm{sync}}$ $\\downarrow$")
-    axes[2].set_title("(c) State Disagreement vs. Rate", fontweight="bold", fontsize=9.2, pad=6)
+    axes[2].set_title("(c) State Disagreement vs. Rate", fontweight="bold", fontsize=9.8, pad=6)
 
     ss_pt = curves["safesync"][3]  # 2600 bits
     axes[1].annotate(
@@ -562,7 +562,7 @@ def plot_fig3_safety_calibration(res: Dict) -> None:
     curves = agg["budget_sweep"]
     cov = agg["delta_coverage_sweep"]
 
-    fig, axes = plt.subplots(1, 3, figsize=(11.4, 3.55))
+    fig, axes = plt.subplots(1, 3, figsize=(11.4, 3.45))
 
     safety_methods = [
         "current_top_k",
@@ -585,7 +585,7 @@ def plot_fig3_safety_calibration(res: Dict) -> None:
 
     axes[0].set_xlabel("Application Downlink Rate $R_t$ (kb/frame)")
     axes[0].set_ylabel("Open-World Unknown Miss (%) $\\downarrow$")
-    axes[0].set_title("(a) Rate vs. Unknown Miss Rate", fontweight="bold", fontsize=9.2, pad=6)
+    axes[0].set_title("(a) Rate vs. Unknown Miss Rate", fontweight="bold", fontsize=9.8, pad=6)
     axes[0].legend(loc="upper right", frameon=True, fontsize=7.2)
 
     # Panel (b): Proposition 1 Requested Risk Target delta vs. Empirical Unknown Event Miss
@@ -606,7 +606,7 @@ def plot_fig3_safety_calibration(res: Dict) -> None:
     axes[1].set_ylim(0, 55)
     axes[1].set_xlabel("Requested Risk Target $\\delta$ (%)")
     axes[1].set_ylabel("Empirical Scene Unknown Miss (%) $\\downarrow$")
-    axes[1].set_title("(b) Proposition 1 Risk Coverage", fontweight="bold", fontsize=9.2, pad=6)
+    axes[1].set_title("(b) Proposition 1 Risk Coverage", fontweight="bold", fontsize=9.8, pad=6)
     axes[1].legend(loc="upper left", frameon=True, fontsize=7.2)
 
     # Panel (c): Reliability Diagram Before vs. After Calibration
@@ -628,7 +628,7 @@ def plot_fig3_safety_calibration(res: Dict) -> None:
     axes[2].set_ylim(0, 0.98)
     axes[2].set_xlabel("Predicted Open-World Risk $p_k$")
     axes[2].set_ylabel("Empirical Unknown Collapse Frequency")
-    axes[2].set_title("(c) Risk Reliability Diagram", fontweight="bold", fontsize=9.2, pad=6)
+    axes[2].set_title("(c) Risk Reliability Diagram", fontweight="bold", fontsize=9.8, pad=6)
     axes[2].legend(loc="upper left", frameon=True, fontsize=7.2)
 
     for ax in axes:
@@ -639,13 +639,14 @@ def plot_fig3_safety_calibration(res: Dict) -> None:
 
 
 # ==============================================================================
-# Figure 4: State Age (SpaceNet-7) and Registration Drift (xBD)
+# Figure 4: State Age, Multi-Skip Bridge & Misregistration Resilience (1x3 Grid)
 # ==============================================================================
 def plot_fig4_temporal_and_registration(res: Dict) -> None:
     sn7 = res["spacenet7_temporal_and_bridge"]["state_age_sweep"]
+    bridge = res["spacenet7_temporal_and_bridge"]["r33_to_r36_architectural_bridge"]
     reg = res["aggregated_3seed"]["registration_stress"]
 
-    fig, axes = plt.subplots(1, 2, figsize=(10.2, 3.65))
+    fig, axes = plt.subplots(1, 3, figsize=(11.4, 3.45))
 
     # Panel (a): SpaceNet-7 State Age vs. Rate & Task F1
     ages = [p["dt_months"] for p in sn7]
@@ -658,66 +659,111 @@ def plot_fig4_temporal_and_registration(res: Dict) -> None:
     ax1_r.spines["top"].set_visible(False)
 
     l1 = ax1.plot(ages, ss_f1, color="#0072B2", marker="o", linestyle="-", linewidth=2.2,
-                  label="SafeSync Building F1 (%)")
+                  label="Building F1 (%)")
     l2 = ax1.plot(ages, new_rec, color="#009E73", marker="^", linestyle="-.", linewidth=1.8,
-                  label="New-Building Emergence Recall (%)")
-    b1 = ax1_r.bar(ages, ss_rates, width=0.45, color="#0072B2", alpha=0.22,
-                   label="SafeSync Adaptive Rate (kb/win)")
+                  label="New-Bldg Recall (%)")
+    b1 = ax1_r.bar(ages, ss_rates, width=0.52, color="#0072B2", alpha=0.22,
+                   label="Adaptive Rate (kb)")
 
     ax1.set_xticks(ages)
-    ax1.set_xticklabels([f"$\\Delta t={a}$ mo" for a in ages])
-    ax1.set_xlabel("SpaceNet-7 Shared State Age $\\Delta t$ (Months)")
-    ax1.set_ylabel("Building F1 / New Recall (%) $\\uparrow$", color="#0F172A")
-    ax1_r.set_ylabel("Downlink Rate $R_t$ (kb/window)", color="#475569")
+    ax1.set_xticklabels([f"$\\Delta t={a}$m" for a in ages])
+    ax1.set_xlabel("SpaceNet-7 State Age $\\Delta t$")
+    ax1.set_ylabel("Building F1 / Recall (%) $\\uparrow$", color="#0F172A")
+    ax1_r.set_ylabel("Rate $R_t$ (kb/win)", color="#475569")
     ax1.set_ylim(18, 79)
-    ax1_r.set_ylim(0, 14.8)
+    ax1_r.set_ylim(0, 15.2)
     for a_val, r_val in zip(ages, ss_rates):
-        ax1_r.text(a_val, r_val + 0.28, f"{r_val:.1f} kb", ha="center", va="bottom",
-                   fontsize=7.0, fontweight="bold", color="#334155")
-    ax1.set_title("(a) SpaceNet-7 State Age & Refresh", fontweight="bold", fontsize=9.2, pad=6)
+        ax1_r.text(a_val, r_val + 0.30, f"{r_val:.1f}kb", ha="center", va="bottom",
+                   fontsize=7.6, fontweight="bold", color="#334155")
+    ax1.set_title("(a) SpaceNet-7 State Age Sweep", fontweight="bold", fontsize=9.8, pad=6)
 
     lines = l1 + l2 + [b1]
     labels = [l.get_label() for l in lines]
-    ax1.legend(lines, labels, loc="center left", bbox_to_anchor=(0.02, 0.56), frameon=True, fontsize=7.1)
+    ax1.legend(lines, labels, loc="center left", bbox_to_anchor=(0.02, 0.56), frameon=True, fontsize=7.4)
     clean_ax(ax1)
 
-    # Panel (b): Registration Perturbation sigma_reg in {0, 2, 4, 8} px
+    # Panel (b): SpaceNet-7 Multi-Skip vs. Stage-2 Bottleneck VQ Bridge
+    axb = axes[1]
+    axb_r = axb.twinx()
+    axb_r.spines["top"].set_visible(False)
+
+    b_names = ["5-Skip\nFP16", "Raw\nPNG", "Drop\nSkips", "SafeSync\nVQ"]
+    b_kb = np.array([
+        bridge["r33_naive_5skip_fp16_bytes_2windows"] / 1024.0,
+        bridge["r33_png_update_bytes_2windows"] / 1024.0,
+        bridge["r35_unadapted_conv5_only_bytes_2windows"] / 1024.0,
+        bridge["r36_safesync_stage2_vq_bytes_2windows"] / 1024.0,
+    ])
+    b_rec = [
+        bridge["r33_naive_5skip_fp16_new_recall_pct"],
+        bridge["r33_naive_5skip_fp16_new_recall_pct"],
+        bridge["r35_unadapted_conv5_only_new_recall_pct"],
+        bridge["r36_safesync_stage2_vq_new_recall_pct"],
+    ]
+    b_f1 = [
+        bridge["r33_naive_5skip_fp16_f1_pct"],
+        bridge["r33_naive_5skip_fp16_f1_pct"],
+        bridge["r35_unadapted_conv5_only_f1_pct"],
+        bridge["r36_safesync_stage2_vq_f1_pct"],
+    ]
+    xb = np.arange(len(b_names))
+    bar_colors = ["#94A3B8", "#CBD5E1", "#FCA5A5", "#93C5FD"]
+    bars_b = axb_r.bar(xb, np.log10(b_kb), width=0.48, color=bar_colors, edgecolor="#475569", alpha=0.55,
+                       label="$\\log_{10}$(KB, 2 win)")
+    lb1 = axb.plot(xb, b_f1, color="#0072B2", marker="o", linewidth=2.1, label="Building F1 (%)")
+    lb2 = axb.plot(xb, b_rec, color="#D55E00", marker="s", linestyle="--", linewidth=1.9, label="New Recall (%)")
+    axb.set_xticks(xb)
+    axb.set_xticklabels(b_names, fontsize=8.2)
+    axb.set_xlabel("Two-Window Representation")
+    axb.set_ylabel("F1 / Emergence Recall (%) $\\uparrow$")
+    axb_r.set_ylabel("$\\log_{10}$ Payload (KB) $\\downarrow$", color="#475569")
+    axb.set_ylim(0, 84)
+    axb_r.set_ylim(-0.3, 5.3)
+    axb.annotate("1.12 KB\n(28,830x)", xy=(3, b_rec[3]), xytext=(2.05, 47.0),
+                 arrowprops=dict(arrowstyle="->", color="#0072B2", lw=1.1),
+                 fontsize=7.4, fontweight="bold", color="#0072B2",
+                 bbox=dict(boxstyle="round,pad=0.18", fc="#EFF6FF", ec="#0072B2", lw=0.8))
+    axb.set_title("(b) Multi-Skip vs. Bottleneck VQ", fontweight="bold", fontsize=9.8, pad=6)
+    lines_m = lb1 + lb2 + [bars_b]
+    axb.legend(lines_m, [l.get_label() for l in lines_m], loc="upper right", bbox_to_anchor=(0.99, 0.87), frameon=True, fontsize=6.9)
+    clean_ax(axb)
+
+    # Panel (c): Registration Perturbation sigma_reg in {0, 2, 4, 8} px
     sigmas = [p["registration_shift_px"] for p in reg]
     adapt_f1 = [p["safesync_adaptive_sync_f1"] for p in reg]
     static_f1 = [p["static_utility_sync_f1"] for p in reg]
     adapt_rate = [p["safesync_adaptive_rate_kb"] for p in reg]
-    ref_pct = [p["refresh_trigger_pct"] for p in reg]
 
-    ax2 = axes[1]
+    ax2 = axes[2]
     ax2_r = ax2.twinx()
     ax2_r.spines["top"].set_visible(False)
 
     m1 = ax2.plot(sigmas, adapt_f1, color="#0072B2", marker="o", linestyle="-", linewidth=2.2,
-                  label="SafeSync w/ Refresh Trigger Sync-F1 (%)")
+                  label="SafeSync w/ Refresh")
     m2 = ax2.plot(sigmas, static_f1, color="#D55E00", marker="s", linestyle="--", linewidth=1.8,
-                  label="Static Prior Reuse (No Refresh) Sync-F1 (%)")
+                  label="Static Prior Reuse")
     m3 = ax2_r.plot(sigmas, adapt_rate, color="#009E73", marker="^", linestyle="-.", linewidth=1.8,
-                    label="SafeSync Adaptive Rate (kb/frame)")
+                    label="Adaptive Rate (kb)")
 
     for s, r in zip(sigmas, adapt_rate):
         if s >= 2:
-            ax2_r.annotate(f"{r:.1f} kb", xy=(s, r),
-                           xytext=(s - 0.55, r + 0.55),
-                           fontsize=7.0, fontweight="bold", color="#009E73",
-                           bbox=dict(boxstyle="round,pad=0.12", fc="white", ec="none", alpha=0.85))
+            ax2_r.annotate(f"{r:.1f}kb", xy=(s, r),
+                           xytext=(s - 0.75, r + 0.55),
+                           fontsize=7.4, fontweight="bold", color="#009E73",
+                           bbox=dict(boxstyle="round,pad=0.10", fc="white", ec="none", alpha=0.85))
 
     ax2.set_xticks(sigmas)
-    ax2.set_xticklabels([f"{s} px" for s in sigmas])
-    ax2.set_xlabel("Georeferenced Registration Error $\\sigma_{\\mathrm{reg}}$ (Pixels)")
+    ax2.set_xticklabels([f"{s}px" for s in sigmas])
+    ax2.set_xlabel("Misregistration $\\sigma_{\\mathrm{reg}}$ (Pixels)")
     ax2.set_ylabel("Open-World Sync-F1 (%) $\\uparrow$", color="#0F172A")
-    ax2_r.set_ylabel("Downlink Rate $R_t$ (kb/frame)", color="#009E73")
+    ax2_r.set_ylabel("Rate $R_t$ (kb/frame)", color="#009E73")
     ax2.set_ylim(48, 76)
-    ax2_r.set_ylim(1.0, 9.2)
-    ax2.set_title("(b) Misregistration Stress & Refresh Trigger", fontweight="bold", fontsize=9.2, pad=6)
+    ax2_r.set_ylim(1.0, 9.4)
+    ax2.set_title("(c) Misregistration & Refresh", fontweight="bold", fontsize=9.8, pad=6)
 
     lines2 = m1 + m2 + m3
     labels2 = [l.get_label() for l in lines2]
-    ax2.legend(lines2, labels2, loc="lower right", frameon=True, fontsize=7.0)
+    ax2.legend(lines2, labels2, loc="lower right", frameon=True, fontsize=7.2)
     clean_ax(ax2)
 
     fig.tight_layout()
@@ -725,17 +771,18 @@ def plot_fig4_temporal_and_registration(res: Dict) -> None:
 
 
 # ==============================================================================
-# Figure 5: Overhead Decomposition & Rician Fading Channel Robustness
+# Figure 5: Overhead Decomposition, Rician Fading & Reserve Sensitivity (1x3 Grid)
 # ==============================================================================
 def plot_fig5_overhead_and_channel(res: Dict) -> None:
     agg = res["aggregated_3seed"]
     ss_pts = agg["budget_sweep"]["safesync"]
     ch = agg["channel_robustness_sweep"]
+    rho_sw = res["full_system_ablation_and_sensitivity"]["safety_reserve_ratio_sweep"]
 
-    fig, axes = plt.subplots(1, 2, figsize=(10.2, 3.65))
+    fig, axes = plt.subplots(1, 3, figsize=(11.4, 3.45))
 
     # Panel (a): Overhead Decomposition across budgets
-    x_labels = [f"{p['rate_kb_per_frame']:.1f}kb" for p in ss_pts]
+    x_labels = [f"{p['rate_kb_per_frame']:.1f}" for p in ss_pts]
     x = np.arange(len(ss_pts))
     tot = np.array([p["overhead_breakdown_bits"]["total_bits"] for p in ss_pts])
     tok_pct = np.array([p["overhead_breakdown_bits"]["token_payload_bits"] for p in ss_pts]) / tot * 100.0
@@ -745,20 +792,20 @@ def plot_fig5_overhead_and_channel(res: Dict) -> None:
     useful_pct = tok_pct + saf_pct
 
     ax1 = axes[0]
-    ax1.bar(x, tok_pct, width=0.55, label="Token Payload ($b_{\\mathrm{tok}}$)", color="#0072B2")
-    ax1.bar(x, saf_pct, width=0.55, bottom=tok_pct, label="Safety Metadata ($b_{\\mathrm{safe}}$)", color="#009E73")
-    ax1.bar(x, msk_pct, width=0.55, bottom=tok_pct + saf_pct, label="Spatial Mask ($b_{\\mathrm{mask}}$)", color="#E69F00")
-    ax1.bar(x, hdr_pct, width=0.55, bottom=tok_pct + saf_pct + msk_pct, label="Header + CRC ($b_{\\mathrm{hdr}}$)", color="#CC79A7")
+    ax1.bar(x, tok_pct, width=0.58, label="Token ($b_{\\mathrm{tok}}$)", color="#0072B2")
+    ax1.bar(x, saf_pct, width=0.58, bottom=tok_pct, label="Safety ($b_{\\mathrm{safe}}$)", color="#009E73")
+    ax1.bar(x, msk_pct, width=0.58, bottom=tok_pct + saf_pct, label="Mask ($b_{\\mathrm{mask}}$)", color="#E69F00")
+    ax1.bar(x, hdr_pct, width=0.58, bottom=tok_pct + saf_pct + msk_pct, label="Header ($b_{\\mathrm{hdr}}$)", color="#CC79A7")
     ax1.plot(x, useful_pct, color="#111827", marker="o", linewidth=1.8, linestyle="--",
-             label="Useful Evidence Ratio (%)")
+             label="Evidence (%)")
 
     ax1.set_xticks(x)
-    ax1.set_xticklabels(x_labels, rotation=20)
+    ax1.set_xticklabels(x_labels)
     ax1.set_ylim(0, 108)
-    ax1.set_xlabel("Application Downlink Rate $R_t$ (kb/frame)")
-    ax1.set_ylabel("Application-Layer Bit Share (%)")
-    ax1.set_title("(a) Complete Application-Layer Bit Accounting", fontweight="bold", fontsize=9.2, pad=6)
-    ax1.legend(loc="lower right", frameon=True, fontsize=7.0, ncol=2)
+    ax1.set_xlabel("Downlink Rate $R_t$ (kb/frame)")
+    ax1.set_ylabel("Wire-Frame Bit Share (%)")
+    ax1.set_title("(a) Wire-Level Bit Accounting", fontweight="bold", fontsize=9.8, pad=6)
+    ax1.legend(loc="lower right", frameon=True, fontsize=6.9, ncol=2, columnspacing=0.6)
     clean_ax(ax1)
 
     # Panel (b): Rician SNR Robustness
@@ -767,7 +814,6 @@ def plot_fig5_overhead_and_channel(res: Dict) -> None:
     ss_f1 = [c["safesync"]["sync_f1"] for c in ch_sorted]
     tw_f1 = [c["twist_inspired"]["sync_f1"] for c in ch_sorted]
     st_f1 = [c["stars_adapted"]["sync_f1"] for c in ch_sorted]
-
     ss_miss = [c["safesync"]["u_miss"] for c in ch_sorted]
     ut_miss = [c["stateful_utility_only"]["u_miss"] for c in ch_sorted]
 
@@ -775,30 +821,53 @@ def plot_fig5_overhead_and_channel(res: Dict) -> None:
     ax2_r = ax2.twinx()
     ax2_r.spines["top"].set_visible(False)
 
-    p1 = ax2.plot(snrs, ss_f1, color="#0072B2", marker="o", linestyle="-", linewidth=2.2,
-                  label="SafeSync Sync-F1 (%)")
-    p2 = ax2.plot(snrs, tw_f1, color="#D55E00", marker="s", linestyle="--", linewidth=1.6,
-                  label="TWIST-inspired Sync-F1 (%)")
-    p3 = ax2.plot(snrs, st_f1, color="#E69F00", marker="v", linestyle="--", linewidth=1.6,
-                  label="STARS-style Sync-F1 (%)")
+    p1 = ax2.plot(snrs, ss_f1, color="#0072B2", marker="o", linestyle="-", linewidth=2.2, label="SafeSync F1")
+    p2 = ax2.plot(snrs, tw_f1, color="#D55E00", marker="s", linestyle="--", linewidth=1.6, label="TWIST F1")
+    p3 = ax2.plot(snrs, st_f1, color="#E69F00", marker="v", linestyle="--", linewidth=1.6, label="STARS F1")
+    p4 = ax2_r.plot(snrs, ss_miss, color="#0072B2", marker="o", linestyle=":", linewidth=1.8, label="SafeSync Miss")
+    p5 = ax2_r.plot(snrs, ut_miss, color="#009E73", marker="^", linestyle=":", linewidth=1.8, label="Util-Only Miss")
 
-    p4 = ax2_r.plot(snrs, ss_miss, color="#0072B2", marker="o", linestyle=":", linewidth=1.8,
-                    label="SafeSync Unknown Miss (%) $\\downarrow$")
-    p5 = ax2_r.plot(snrs, ut_miss, color="#009E73", marker="^", linestyle=":", linewidth=1.8,
-                    label="Utility-Only Unknown Miss (%) $\\downarrow$")
-
-    ax2.set_xlabel("Rician Fading Channel SNR (dB) ($K_{\\mathrm{Rician}}=6$ dB)")
+    ax2.set_xlabel("Rician Channel SNR (dB) ($K=6$ dB)")
     ax2.set_ylabel("Open-World Sync-F1 (%) $\\uparrow$", color="#0F172A")
-    ax2_r.set_ylabel("Unknown Miss Rate (%) $\\downarrow$", color="#475569")
+    ax2_r.set_ylabel("Unknown Miss (%) $\\downarrow$", color="#475569")
     ax2.set_ylim(27, 75)
     ax2_r.set_ylim(-14, 82)
-    ax2.set_title("(b) Rician Fading & Packet-Erasure Robustness", fontweight="bold", fontsize=9.2, pad=6)
+    ax2.set_title("(b) Rician Fading Resilience", fontweight="bold", fontsize=9.8, pad=6)
 
     lines_b = p1 + p2 + p3 + p4 + p5
-    labels_b = [l.get_label() for l in lines_b]
-    ax2.legend(lines_b, labels_b, loc="lower left", bbox_to_anchor=(0.01, 0.01),
-               ncol=2, frameon=True, fontsize=6.4, columnspacing=0.8)
+    ax2.legend(lines_b, [l.get_label() for l in lines_b], loc="lower left", bbox_to_anchor=(0.01, 0.01),
+               ncol=2, frameon=True, fontsize=6.8, columnspacing=0.6)
     clean_ax(ax2)
+
+    # Panel (c): Safety Reserve Cap rho_safe Trade-off Curve
+    ax3 = axes[2]
+    ax3_r = ax3.twinx()
+    ax3_r.spines["top"].set_visible(False)
+
+    rhos = [r["rho_safe"] for r in rho_sw]
+    r_sf1 = [r["sync_f1"] for r in rho_sw]
+    r_kf1 = [r["known_f1"] for r in rho_sw]
+    r_umiss = [r["u_miss"] for r in rho_sw]
+
+    s1 = ax3.plot(rhos, r_kf1, color="#009E73", marker="^", linestyle="--", linewidth=1.7, label="Known-Task F1")
+    s2 = ax3.plot(rhos, r_sf1, color="#0072B2", marker="o", linestyle="-", linewidth=2.2, label="All-Class Sync-F1")
+    s3 = ax3_r.plot(rhos, r_umiss, color="#D55E00", marker="s", linestyle="-.", linewidth=1.9, label="Unknown Miss $\\downarrow$")
+    ax3.axvline(0.25, color="#0072B2", linestyle=":", linewidth=1.2, alpha=0.8)
+    ax3.annotate("$\\rho_{\\mathrm{safe}}=0.25$\nPareto Knee", xy=(0.25, 63.15), xytext=(0.28, 64.9),
+                 arrowprops=dict(arrowstyle="->", color="#0072B2", lw=1.0),
+                 fontsize=7.3, fontweight="bold", color="#0072B2",
+                 bbox=dict(boxstyle="round,pad=0.16", fc="#EFF6FF", ec="#0072B2", lw=0.75))
+
+    ax3.set_xlabel("Safety Reserve Cap $\\rho_{\\mathrm{safe}}$")
+    ax3.set_ylabel("Known / Sync-F1 (%) $\\uparrow$")
+    ax3_r.set_ylabel("Unknown Miss (%) $\\downarrow$", color="#D55E00")
+    ax3.set_ylim(56.5, 71.0)
+    ax3_r.set_ylim(25.0, 70.0)
+    ax3.set_title("(c) Safety Reserve Sensitivity", fontweight="bold", fontsize=9.8, pad=6)
+
+    lines_c = s1 + s2 + s3
+    ax3.legend(lines_c, [l.get_label() for l in lines_c], loc="lower left", frameon=True, fontsize=7.0)
+    clean_ax(ax3)
 
     fig.tight_layout()
     save_pub_fig(fig, "fig5_overhead_and_channel_robustness")
@@ -844,7 +913,7 @@ def plot_fig6_qualitative() -> None:
         if len(loaded_imgs) == len(wanted_names):
             break
 
-    fig, axes = plt.subplots(2, 6, figsize=(12.2, 4.35))
+    fig, axes = plt.subplots(2, 6, figsize=(11.4, 3.95))
     col_titles = [
         "(a) Prior Reference $X_{t-1}$",
         "(b) Post-Event $X_t$ & $U_{t,k}$",
@@ -973,7 +1042,7 @@ def plot_fig7_multisat_constellation(res: Dict) -> None:
     w_sweep = ms["aggregated_3seed_workload_sweep"]
     h_sweep = ms["aggregated_3seed_hop_sweep"]
 
-    fig, axes = plt.subplots(1, 3, figsize=(11.5, 3.65))
+    fig, axes = plt.subplots(1, 3, figsize=(11.4, 3.15))
 
     # Panel (a): Effective Constellation Sync-F1 vs. Concurrent Disaster Workload
     ms_methods = [
@@ -1000,7 +1069,7 @@ def plot_fig7_multisat_constellation(res: Dict) -> None:
     axes[0].set_ylim(0, 74)
     axes[0].set_xlabel("Concurrent Constellation Workload $N_{\\mathrm{task}}$ (Scenes)")
     axes[0].set_ylabel("Constellation Effective Sync-F1 (%) $\\uparrow$")
-    axes[0].set_title("(a) Multi-Sat Sync-F1 vs. Surge Load", fontweight="bold", fontsize=9.1, pad=6)
+    axes[0].set_title("(a) Multi-Sat Sync-F1 vs. Surge Load", fontweight="bold", fontsize=9.8, pad=6)
 
     # Panel (b): Unknown Catastrophe Miss vs. Mean Time-to-Confirm at N=200 scenes
     for m_key, m_label, color, marker, _ in ms_methods:
@@ -1037,7 +1106,7 @@ def plot_fig7_multisat_constellation(res: Dict) -> None:
     axes[1].set_ylim(20, 102)
     axes[1].set_xlabel("Mean Time-to-Confirm Catastrophe $\\tau_{\\mathrm{confirm}}$ (s) $\\downarrow$")
     axes[1].set_ylabel("Constellation Unknown Miss (%) $\\downarrow$")
-    axes[1].set_title("(b) Latency vs. Unknown Miss ($N_{\\mathrm{task}}=200$)", fontweight="bold", fontsize=9.1, pad=6)
+    axes[1].set_title("(b) Latency vs. Unknown Miss ($N_{\\mathrm{task}}=200$)", fontweight="bold", fontsize=9.8, pad=6)
 
     # Panel (c): Multi-Hop ISL Duplicate Traffic & Confidence Inflation vs. Hops
     hops = [h["isl_hops"] for h in h_sweep]
