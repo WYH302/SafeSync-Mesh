@@ -1,4 +1,4 @@
-# SafeSync-Mesh: Cooperative Open-World State Synchronization and Provenance-Aware Relay over Intermittent LEO Satellite Constellations
+# SafeSync-Mesh: Epistemic State Synchronization and Provenance-Idempotent Relay for Open-World LEO Satellite Constellations
 
 <p align="center">
   <a href="#english-overview"><b>English Overview</b></a> •
@@ -16,7 +16,7 @@
 
 ## English Overview
 
-This repository provides the reference implementation, binary wire-packet codec (`SSYN`), multi-hop constellation simulator, and evaluation suite accompanying our study **SafeSync-Mesh: Cooperative Open-World State Synchronization and Provenance-Aware Relay over Intermittent LEO Satellite Constellations**.
+This repository provides the reference implementation, binary wire-packet codec (`SSYN`), multi-hop constellation simulator, and evaluation suite accompanying our study **SafeSync-Mesh: Epistemic State Synchronization and Provenance-Idempotent Relay for Open-World LEO Satellite Constellations**.
 
 ### Motivation
 
@@ -36,7 +36,7 @@ When agile Earth-observation (EO) satellites cooperate with Starlink-like low-Ea
 
 ## 中文简介
 
-本仓库整理并开源了论文 **《SafeSync-Mesh: Cooperative Open-World State Synchronization and Provenance-Aware Relay over Intermittent LEO Satellite Constellations》** 的核心协议代码、324 字节二进制线级编解码器（`SSYN`）、24 星 Walker-Delta 低轨星间链路（ISL）协同中继仿真脚本以及多基准评测结果，供感兴趣的同行参考、复现与进一步改进。
+本仓库整理并开源了论文 **《SafeSync-Mesh: Epistemic State Synchronization and Provenance-Idempotent Relay for Open-World LEO Satellite Constellations》** 的核心协议代码、324 字节二进制线级编解码器（`SSYN`）、24 星 Walker-Delta 低轨星间链路（ISL）协同中继仿真脚本以及多基准评测结果，供感兴趣的同行参考、复现与进一步改进。
 
 ### 研究背景与问题切入
 
