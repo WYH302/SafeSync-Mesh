@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Generate all 6 publication-quality figures (PDF + 300 DPI PNG) and LaTeX/Markdown tables
-(Table I to Table IV) for the SafeSync IEEE TGRS manuscript directly from
+Generate all 7 publication-grade figures at native 1:1 IEEE Transactions full-page width
+(\textwidth = 7.16 in, zero LaTeX rescaling distortion, locked identical subplot boxes
+across all 1x3 quantitative figures) plus Markdown summary tables from
 safesync_r36_complete_results.json and xbd_safesync_tokens_440.npz.
 """
 
 from __future__ import annotations
 
+import io
 import json
 import math
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Tuple
 
 import matplotlib
 matplotlib.use("Agg")
@@ -21,6 +23,7 @@ from matplotlib.font_manager import FontProperties
 from matplotlib.patches import Circle, FancyArrowPatch, FancyBboxPatch, Polygon, Rectangle, Wedge
 import numpy as np
 from PIL import Image
+import pyarrow.parquet as pq
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PUB_ROOT = PROJECT_ROOT
@@ -31,38 +34,48 @@ FIG_DIR = R36_ROOT / "figures"
 PAPER_DIR = PUB_ROOT / "safesync_paper"
 PAPER_FIG_DIR = PAPER_DIR / "figures"
 DELIVERY_FIG_DIR = PUB_ROOT / "paper_delivery" / "figures"
+LEGACY_FIG_DIR = PUB_ROOT / "paper" / "figures"
 
-for d in [FIG_DIR, PAPER_DIR, PAPER_FIG_DIR, DELIVERY_FIG_DIR]:
+for d in [FIG_DIR, PAPER_DIR, PAPER_FIG_DIR, DELIVERY_FIG_DIR, LEGACY_FIG_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
-# IEEE TGRS Publication Matplotlib Styling (Uniform 11.4-in Base -> 7.16-in \textwidth)
+# Exact 1:1 Native IEEEtran \textwidth = 7.16 in Styling (8 pt standard journal typography)
+IEEE_TEXTWIDTH_IN = 7.16
+CHART_HEIGHT_IN = 2.40
+
 plt.rcParams.update({
     "font.family": "serif",
     "font.serif": ["Times New Roman", "STIXGeneral", "DejaVu Serif"],
     "mathtext.fontset": "stix",
-    "font.size": 10.4,
-    "axes.labelsize": 10.5,
-    "axes.titlesize": 10.6,
-    "xtick.labelsize": 9.2,
-    "ytick.labelsize": 9.2,
-    "legend.fontsize": 8.2,
-    "figure.titlesize": 11.0,
+    "font.size": 7.6,
+    "axes.labelsize": 7.6,
+    "axes.titlesize": 8.0,
+    "xtick.labelsize": 6.8,
+    "ytick.labelsize": 6.8,
+    "legend.fontsize": 6.2,
+    "figure.titlesize": 8.4,
     "pdf.fonttype": 42,
     "ps.fonttype": 42,
-    "axes.linewidth": 0.85,
-    "grid.linewidth": 0.5,
-    "lines.linewidth": 1.85,
-    "lines.markersize": 5.4,
+    "axes.linewidth": 0.75,
+    "grid.linewidth": 0.45,
+    "lines.linewidth": 1.45,
+    "lines.markersize": 4.0,
+    "xtick.major.width": 0.65,
+    "ytick.major.width": 0.65,
+    "xtick.major.size": 2.6,
+    "ytick.major.size": 2.6,
+    "xtick.major.pad": 2.2,
+    "ytick.major.pad": 2.2,
 })
 
 METHOD_LABELS = {
-    "safesync": "SafeSync (Ours)",
+    "safesync": "SafeSync-Mesh (Ours)",
     "twist_inspired": "TWIST-inspired",
     "stateful_utility_only": "Stateful utility-only",
     "change_only": "Change-only",
-    "stars_adapted": "STARS-style adapted",
-    "current_top_k": "Current-frame Top-K",
-    "full_feature": "Full feature",
+    "stars_adapted": "STARS-style",
+    "current_top_k": "Current Top-K",
+    "full_feature": "Full VQ Ref",
 }
 
 PALETTE = {
@@ -97,33 +110,102 @@ LINESTYLES = {
 
 
 def save_pub_fig(fig: plt.Figure, stem: str) -> None:
-    for out_dir in [FIG_DIR, PAPER_FIG_DIR, DELIVERY_FIG_DIR]:
-        fig.savefig(out_dir / f"{stem}.pdf", bbox_inches="tight", dpi=300)
-        fig.savefig(out_dir / f"{stem}.png", bbox_inches="tight", dpi=300)
+    """Save at exact fixed canvas size (no bbox_inches='tight' rescaling) so width == 7.16 in."""
+    for out_dir in [FIG_DIR, PAPER_FIG_DIR, DELIVERY_FIG_DIR, LEGACY_FIG_DIR]:
+        fig.savefig(out_dir / f"{stem}.pdf", dpi=300)
+        fig.savefig(out_dir / f"{stem}.png", dpi=300)
     plt.close(fig)
-    print(f"[Saved Figure] {stem}.pdf & {stem}.png")
+    print(f"[Saved Native 7.16-in Figure] {stem}.pdf & {stem}.png")
 
 
-def clean_ax(ax: plt.Axes) -> None:
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.grid(True, linestyle="--", alpha=0.25, zorder=0)
+def make_locked_1x3_figure(titles: Tuple[str, str, str]) -> Tuple[plt.Figure, List[plt.Axes], List[float]]:
+    """
+    Create a 1x3 figure on an exact 7.16 x 2.40 in canvas where every subplot box
+    has identical physical size (1.56 in wide x 1.36 in tall) regardless of twinx().
+    Layout (vertical, H = 2.40 in):
+      - 0.00 .. 0.37 in : x-ticks & x-axis label
+      - 0.37 .. 1.73 in : locked plot box (1.36 in tall)
+      - 1.76 .. 2.16 in : dedicated non-overlapping legend band (0.40 in tall)
+      - 2.27 in         : bold panel titles (a), (b), (c)
+    Layout (horizontal, W = 7.16 in):
+      - [0.47, 2.03] in, [2.80, 4.36] in, [5.13, 6.69] in (symmetric 0.47 in outer, 0.77 in inner)
+    """
+    fig = plt.figure(figsize=(IEEE_TEXTWIDTH_IN, CHART_HEIGHT_IN), facecolor="#FFFFFF")
+    x_starts_in = [0.47, 2.80, 5.13]
+    w_in = 1.56
+    y0_in = 0.42
+    h_in = 1.32
+
+    axes: List[plt.Axes] = []
+    x_centers_norm: List[float] = []
+    for idx, x_in in enumerate(x_starts_in):
+        rect = [
+            x_in / IEEE_TEXTWIDTH_IN,
+            y0_in / CHART_HEIGHT_IN,
+            w_in / IEEE_TEXTWIDTH_IN,
+            h_in / CHART_HEIGHT_IN,
+        ]
+        ax = fig.add_axes(rect)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.grid(True, linestyle="--", alpha=0.25, zorder=0)
+        axes.append(ax)
+        xc = (x_in + 0.5 * w_in) / IEEE_TEXTWIDTH_IN
+        x_centers_norm.append(xc)
+        fig.text(
+            xc,
+            2.28 / CHART_HEIGHT_IN,
+            titles[idx],
+            ha="center",
+            va="center",
+            fontsize=8.0,
+            fontweight="bold",
+            color="#0F172A",
+        )
+    return fig, axes, x_centers_norm
+
+
+def add_band_legend(
+    fig: plt.Figure,
+    handles: list,
+    labels: list,
+    x_center_norm: float,
+    ncol: int,
+    fontsize: float = 6.0,
+    colspacing: float = 0.65,
+    handlelength: float = 1.35,
+) -> None:
+    """Place a crisp legend pill centered in the dedicated [1.76..2.16 in] header band."""
+    leg = fig.legend(
+        handles,
+        labels,
+        loc="center",
+        bbox_to_anchor=(x_center_norm, 1.98 / CHART_HEIGHT_IN),
+        ncol=ncol,
+        fontsize=fontsize,
+        frameon=True,
+        facecolor="#F8FAFC",
+        edgecolor="#CBD5E1",
+        framealpha=0.96,
+        columnspacing=colspacing,
+        handlelength=handlelength,
+        handletextpad=0.35,
+        borderpad=0.26,
+        labelspacing=0.22,
+    )
+    leg.get_frame().set_linewidth(0.6)
 
 
 # ==============================================================================
 # Figure 1: SafeSync-Mesh System Architecture & Wire-Frame Bit Layout Diagram
-#           (Comic Sans MS Academic Style + Real Satellite Patches & LEO Mesh)
+#           (Native 7.16 x 3.32 in, Crisp Comic Sans MS Academic Style)
 # ==============================================================================
 def plot_fig1_architecture(res: Dict) -> None:
-    import io
-    import pyarrow.parquet as pq
-
-    comic_reg_path = Path(r"./fonts\comic.ttf")
-    comic_bold_path = Path(r"./fonts\comicbd.ttf")
+    comic_reg_path = Path("assets/fonts/comic.ttf")
+    comic_bold_path = Path("assets/fonts/comicbd.ttf")
     fp_reg = FontProperties(fname=str(comic_reg_path)) if comic_reg_path.exists() else FontProperties(family="sans-serif")
     fp_bold = FontProperties(fname=str(comic_bold_path)) if comic_bold_path.exists() else FontProperties(family="sans-serif", weight="bold")
 
-    # Load one real disaster scene pair + token grids for crisp visual thumbnails inside Fig. 1
     xbd_npz = np.load(CACHE_DIR / "xbd_safesync_tokens_440.npz")
     scenes = json.loads((CACHE_DIR / "xbd_safesync_scenes_440.json").read_text(encoding="utf-8"))
     cell_gt = xbd_npz["cell_gt_counts"].astype(np.int32)
@@ -172,7 +254,6 @@ def plot_fig1_architecture(res: Dict) -> None:
     u_grid = ((cell_gt[best_idx, :, 4] >= 16) | ((cell_gt[best_idx, :, 3] + cell_gt[best_idx, :, 4]) >= 16)).reshape(32, 32)
     k_grid = (((cell_gt[best_idx, :, 1] + cell_gt[best_idx, :, 2]) >= 16) & (~u_grid.ravel())).reshape(32, 32)
 
-    # Build fused state overlay thumbnail (gold = S_safe rescued collapse, emerald = known utility TP)
     fused_thumb = (post_thumb.astype(np.float32) * 0.65).astype(np.uint8)
     for rr in range(32):
         for cc in range(32):
@@ -182,30 +263,31 @@ def plot_fig1_architecture(res: Dict) -> None:
             elif k_grid[rr, cc]:
                 fused_thumb[r0:r1, c0:c1] = np.array([20, 184, 130], dtype=np.uint8)
 
-    fig = plt.figure(figsize=(11.4, 5.15), facecolor="#FFFFFF")
+    # Native 7.16 x 3.32 in canvas (1:1 exact IEEE \textwidth)
+    fig = plt.figure(figsize=(IEEE_TEXTWIDTH_IN, 3.32), facecolor="#FFFFFF")
     ax = fig.add_axes([0.0, 0.0, 1.0, 1.0], facecolor="#FFFFFF")
-    ax.set_xlim(0, 132)
-    ax.set_ylim(-11.8, 49.5)
+    ax.set_xlim(0.5, 131.5)
+    ax.set_ylim(-11.4, 49.0)
     ax.axis("off")
 
-    def ctext(x, y, s, size=8.2, bold=False, color="#1E293B", ha="center", va="center", z=8, linespacing=1.16, bbox=None):
+    def ctext(x, y, s, size=6.2, bold=False, color="#1E293B", ha="center", va="center", z=8, linespacing=1.15, bbox=None):
         return ax.text(
-            x, y, s, ha=ha, va=va, fontsize=size * 0.94, color=color,
+            x, y, s, ha=ha, va=va, fontsize=size, color=color,
             fontproperties=(fp_bold if bold else fp_reg),
             zorder=z, linespacing=linespacing, bbox=bbox
         )
 
-    def draw_card(x, y, w, h, fc="#FFFFFF", ec="#334155", lw=1.35, r=1.3, shadow=True, z=3):
+    def draw_card(x, y, w, h, fc="#FFFFFF", ec="#334155", lw=1.0, r=1.2, shadow=True, z=3):
         if shadow:
             sh = FancyBboxPatch(
-                (x + 0.32, y - 0.38), w, h,
-                boxstyle=f"round,pad=0.22,rounding_size={r}",
-                facecolor="#CBD5E1", edgecolor="none", alpha=0.42, zorder=z - 1
+                (x + 0.28, y - 0.32), w, h,
+                boxstyle=f"round,pad=0.20,rounding_size={r}",
+                facecolor="#CBD5E1", edgecolor="none", alpha=0.40, zorder=z - 1
             )
             ax.add_patch(sh)
         box = FancyBboxPatch(
             (x, y), w, h,
-            boxstyle=f"round,pad=0.22,rounding_size={r}",
+            boxstyle=f"round,pad=0.20,rounding_size={r}",
             facecolor=fc, edgecolor=ec, linewidth=lw, zorder=z
         )
         ax.add_patch(box)
@@ -217,274 +299,251 @@ def plot_fig1_architecture(res: Dict) -> None:
         def rot_pts(pts):
             return [(cx + scale * (px * cos_a - py * sin_a), cy + scale * (px * sin_a + py * cos_a)) for px, py in pts]
 
-        # Solar panels left & right + struts
-        ax.plot([cx - 2.3 * scale * cos_a, cx + 2.3 * scale * cos_a],
-                [cy - 2.3 * scale * sin_a, cy + 2.3 * scale * sin_a], color="#475569", lw=1.4, zorder=z)
-        for sx in [-1.65, 1.65]:
-            p_rect = rot_pts([(sx - 0.68, -0.36), (sx + 0.68, -0.36), (sx + 0.68, 0.36), (sx - 0.68, 0.36)])
-            ax.add_patch(Polygon(p_rect, closed=True, facecolor=panel_c, edgecolor="#0F172A", lw=0.85, zorder=z + 1))
-        # Satellite bus body
-        b_rect = rot_pts([(-0.52, -0.52), (0.52, -0.52), (0.52, 0.52), (-0.52, 0.52)])
-        ax.add_patch(Polygon(b_rect, closed=True, facecolor=body_c, edgecolor="#0F172A", lw=0.95, zorder=z + 2))
-        # Sensor lens dot
-        ax.add_patch(Circle((cx, cy - 0.45 * scale), 0.18 * scale, facecolor="#38BDF8", edgecolor="#0F172A", lw=0.6, zorder=z + 3))
+        ax.plot([cx - 2.2 * scale * cos_a, cx + 2.2 * scale * cos_a],
+                [cy - 2.2 * scale * sin_a, cy + 2.2 * scale * sin_a], color="#475569", lw=1.05, zorder=z)
+        for sx in [-1.60, 1.60]:
+            p_rect = rot_pts([(sx - 0.66, -0.35), (sx + 0.66, -0.35), (sx + 0.66, 0.35), (sx - 0.66, 0.35)])
+            ax.add_patch(Polygon(p_rect, closed=True, facecolor=panel_c, edgecolor="#0F172A", lw=0.65, zorder=z + 1))
+        b_rect = rot_pts([(-0.50, -0.50), (0.50, -0.50), (0.50, 0.50), (-0.50, 0.50)])
+        ax.add_patch(Polygon(b_rect, closed=True, facecolor=body_c, edgecolor="#0F172A", lw=0.75, zorder=z + 2))
+        ax.add_patch(Circle((cx, cy - 0.42 * scale), 0.17 * scale, facecolor="#38BDF8", edgecolor="#0F172A", lw=0.5, zorder=z + 3))
 
-    def draw_flow_arrow(x1, y1, x2, y2, label="", color="#334155", lw=1.65, rad=0.0, dy=1.25):
+    def draw_flow_arrow(x1, y1, x2, y2, label="", color="#334155", lw=1.2, rad=0.0, dy=1.35):
         arr = FancyArrowPatch(
             (x1, y1), (x2, y2),
             connectionstyle=f"arc3,rad={rad}",
-            arrowstyle="-|>,head_length=5.0,head_width=3.1",
+            arrowstyle="-|>,head_length=3.8,head_width=2.4",
             color=color, linewidth=lw, zorder=9
         )
         ax.add_patch(arr)
         if label:
             mx, my = (x1 + x2) / 2, (y1 + y2) / 2 + dy
-            ctext(mx, my, label, size=7.1, bold=True, color=color, z=10,
-                  bbox=dict(boxstyle="round,pad=0.16", fc="#FFFFFF", ec=color, lw=0.75, alpha=0.95))
+            ctext(mx, my, label, size=5.5, bold=True, color=color, z=10,
+                  bbox=dict(boxstyle="round,pad=0.13", fc="#FFFFFF", ec=color, lw=0.6, alpha=0.96))
 
-    # Top Title Banner
+    # Top Title Banner (native 8.2 pt Comic Sans Bold)
     ctext(
-        66.0, 47.6,
+        66.0, 47.4,
         "SafeSync-Mesh: Distributed Orbital Epistemic State Machine over Starlink-Like LEO Relay Constellations",
-        size=10.6, bold=True, color="#0F172A"
+        size=8.2, bold=True, color="#0F172A"
     )
 
-    # 5 Outer Stage Containers (Soft Pastel CVPR/ICLR Oral Style)
     stage_specs = [
-        (1.2, 2.6, 24.4, 42.2, "1. Multi-Sat EO & Prior State", "#EFF6FF", "#60A5FA", "#1D4ED8"),
-        (27.2, 2.6, 25.0, 42.2, "2. Orthogonal Utility-Risk", "#F0FDFA", "#5EEAD4", "#0F766E"),
-        (53.8, 2.6, 24.6, 42.2, "3. Epistemic Safety Valve", "#FFFBEB", "#FBBF24", "#B45309"),
-        (80.0, 2.6, 24.6, 42.2, "4. LEO ISL Relay Mesh", "#ECFDF5", "#6EE7B7", "#047857"),
-        (106.2, 2.6, 24.6, 42.2, "5. Idempotent State Algebra", "#F5F3FF", "#C4B5FD", "#5B21B6"),
+        (1.0, 2.6, 24.5, 42.2, "1. Multi-Sat EO & Prior", "#EFF6FF", "#60A5FA", "#1D4ED8"),
+        (27.1, 2.6, 25.0, 42.2, "2. Utility-Risk Split", "#F0FDFA", "#5EEAD4", "#0F766E"),
+        (53.7, 2.6, 24.6, 42.2, "3. Epistemic Safety Valve", "#FFFBEB", "#FBBF24", "#B45309"),
+        (79.9, 2.6, 24.6, 42.2, "4. LEO ISL Relay Mesh", "#ECFDF5", "#6EE7B7", "#047857"),
+        (106.1, 2.6, 24.9, 42.2, "5. Idempotent Algebra", "#F5F3FF", "#C4B5FD", "#5B21B6"),
     ]
     for sx, sy, sw, sh, stitle, sfc, sec, pill_c in stage_specs:
-        draw_card(sx, sy, sw, sh, fc=sfc, ec=sec, lw=1.35, r=1.6, shadow=True, z=2)
+        draw_card(sx, sy, sw, sh, fc=sfc, ec=sec, lw=1.05, r=1.4, shadow=True, z=2)
         pill = FancyBboxPatch(
-            (sx + 1.0, sy + sh - 3.6), sw - 2.0, 2.7,
-            boxstyle="round,pad=0.15,rounding_size=0.9",
+            (sx + 0.8, sy + sh - 3.65), sw - 1.6, 2.75,
+            boxstyle="round,pad=0.14,rounding_size=0.8",
             facecolor=pill_c, edgecolor="none", zorder=4
         )
         ax.add_patch(pill)
-        ctext(sx + sw / 2, sy + sh - 2.25, stitle, size=8.2, bold=True, color="#FFFFFF", z=5)
+        ctext(sx + sw / 2, sy + sh - 2.28, stitle, size=6.6, bold=True, color="#FFFFFF", z=5)
 
-    # ==========================================================================
-    # STAGE 1: Agile Sensing Pass S_m + Prior Pass S_{m-1} + 32x32 VQ Mosaic
-    # ==========================================================================
-    draw_card(2.4, 24.4, 22.0, 15.4, fc="#FFFFFF", ec="#3B82F6", lw=1.25, r=1.1, shadow=False, z=4)
-    ctext(13.4, 38.2, "Agile Sensing Pass  $S_m$ :  $X_t$", size=8.0, bold=True, color="#1D4ED8")
-    # Satellite S_m + optical beam cone + real disaster thumbnail
-    draw_sat_icon(6.6, 34.7, scale=1.05, angle_deg=-20.0, body_c="#334155", panel_c="#2563EB", z=6)
-    cone = Polygon([(6.6, 34.0), (3.4, 26.2), (10.6, 26.2)], closed=True, facecolor="#38BDF8", alpha=0.22, zorder=5)
-    ax.add_patch(cone)
-    ax.imshow(post_thumb, extent=(3.4, 10.6, 26.0, 32.1), aspect="auto", zorder=6)
-    ax.add_patch(Rectangle((3.4, 26.0), 7.2, 6.1, fill=False, edgecolor="#EF4444", lw=1.2, zorder=7))
-    ctext(7.0, 25.15, "Disaster $X_t$", size=6.6, bold=True, color="#B91C1C")
+    # STAGE 1
+    draw_card(2.1, 24.4, 22.3, 15.4, fc="#FFFFFF", ec="#3B82F6", lw=0.95, r=1.0, shadow=False, z=4)
+    ctext(13.25, 38.2, "Agile Sensing Pass $S_m$: $X_t$", size=6.3, bold=True, color="#1D4ED8")
+    draw_sat_icon(6.4, 34.8, scale=1.0, angle_deg=-20.0, body_c="#334155", panel_c="#2563EB", z=6)
+    ax.add_patch(Polygon([(6.4, 34.0), (3.2, 26.3), (10.4, 26.3)], closed=True, facecolor="#38BDF8", alpha=0.22, zorder=5))
+    ax.imshow(post_thumb, extent=(3.2, 10.4, 26.2, 32.2), aspect="auto", zorder=6)
+    ax.add_patch(Rectangle((3.2, 26.2), 7.2, 6.0, fill=False, edgecolor="#EF4444", lw=0.95, zorder=7))
+    ctext(6.8, 25.15, "Disaster $X_t$", size=5.5, bold=True, color="#B91C1C")
 
-    # 10x10 vivid discrete VQ token mosaic (representing 32x32, K=512)
     rng_vq = np.random.default_rng(42)
     vq_palette = np.array([
         [59, 130, 246], [16, 185, 129], [245, 158, 11], [239, 68, 68],
         [139, 92, 246], [14, 165, 233], [236, 72, 153], [251, 191, 36]
     ], dtype=np.uint8)
     vq_mosaic = vq_palette[rng_vq.integers(0, len(vq_palette), size=(10, 10))]
-    ax.imshow(vq_mosaic, extent=(13.6, 23.2, 27.6, 35.8), interpolation="nearest", aspect="auto", zorder=6)
+    ax.imshow(vq_mosaic, extent=(13.5, 23.3, 28.0, 36.0), interpolation="nearest", aspect="auto", zorder=6)
     for gi in range(11):
-        gx = 13.6 + gi * 0.96
-        gy = 27.6 + gi * 0.82
-        ax.plot([gx, gx], [27.6, 35.8], color="#FFFFFF", lw=0.45, zorder=7)
-        ax.plot([13.6, 23.2], [gy, gy], color="#FFFFFF", lw=0.45, zorder=7)
-    ax.add_patch(Rectangle((13.6, 27.6), 9.6, 8.2, fill=False, edgecolor="#1E293B", lw=1.0, zorder=7))
-    draw_flow_arrow(10.8, 29.2, 13.4, 31.5, "$E_\\theta$", color="#1D4ED8", lw=1.35, dy=1.3)
-    ctext(18.4, 26.0, "32x32 VQ Grid\nCodebook $C$ ($K=512$)", size=6.7, bold=True, color="#1E293B")
+        gx = 13.5 + gi * 0.98
+        gy = 28.0 + gi * 0.80
+        ax.plot([gx, gx], [28.0, 36.0], color="#FFFFFF", lw=0.35, zorder=7)
+        ax.plot([13.5, 23.3], [gy, gy], color="#FFFFFF", lw=0.35, zorder=7)
+    ax.add_patch(Rectangle((13.5, 28.0), 9.8, 8.0, fill=False, edgecolor="#1E293B", lw=0.8, zorder=7))
+    draw_flow_arrow(10.6, 29.4, 13.3, 31.8, "$E_\\theta$", color="#1D4ED8", lw=1.05, dy=1.4)
+    ctext(18.4, 26.1, "32x32 VQ ($K=512$)", size=5.6, bold=True, color="#1E293B")
 
-    # Prior Pass S_{m-1} card
-    draw_card(2.4, 4.2, 22.0, 18.2, fc="#FFFFFF", ec="#64748B", lw=1.25, r=1.1, shadow=False, z=4)
-    ctext(13.4, 20.8, "Prior Pass  $S_{m-1}$  &  64-Bit RKS", size=7.9, bold=True, color="#334155")
-    ax.imshow(pre_thumb, extent=(3.4, 10.4, 11.4, 18.8), aspect="auto", zorder=6)
-    ax.add_patch(Rectangle((3.4, 11.4), 7.0, 7.4, fill=False, edgecolor="#475569", lw=1.0, zorder=7))
-    ctext(6.9, 10.3, "Prior $X_{t-1}$", size=6.6, bold=True, color="#475569")
+    draw_card(2.1, 4.2, 22.3, 18.2, fc="#FFFFFF", ec="#64748B", lw=0.95, r=1.0, shadow=False, z=4)
+    ctext(13.25, 20.8, "Prior Pass $S_{m-1}$ & 64-b RKS", size=6.2, bold=True, color="#334155")
+    ax.imshow(pre_thumb, extent=(3.2, 10.1, 11.4, 18.8), aspect="auto", zorder=6)
+    ax.add_patch(Rectangle((3.2, 11.4), 6.9, 7.4, fill=False, edgecolor="#475569", lw=0.85, zorder=7))
+    ctext(6.65, 10.2, "Prior $X_{t-1}$", size=5.5, bold=True, color="#475569")
     ctext(
-        17.3, 15.1,
-        "Georef Align\n$\\overline{M}_{t-1} = A_t(M_{t-1})$\n- Prior $\\overline{z}_{t-1,k}$\n- Confidence $q_{t-1}$\n- State Age $a_{t-1}$",
-        size=6.8, color="#1E293B", linespacing=1.18
+        17.2, 15.0,
+        "Aligned $\\overline{M}_{t-1}$\n- Tokens $\\overline{z}_{t-1,k}$\n- Conf. $q_{t-1,k}$\n- Age $a_{t-1,k}$",
+        size=5.7, color="#1E293B", linespacing=1.18
     )
-    rks_badge = FancyBboxPatch((3.4, 5.1), 19.8, 3.6, boxstyle="round,pad=0.12,rounding_size=0.7",
-                               facecolor="#F5F3FF", edgecolor="#7C3AED", lw=1.0, zorder=5)
+    rks_badge = FancyBboxPatch((3.1, 5.0), 20.3, 3.6, boxstyle="round,pad=0.10,rounding_size=0.6",
+                               facecolor="#F5F3FF", edgecolor="#7C3AED", lw=0.8, zorder=5)
     ax.add_patch(rks_badge)
-    ctext(13.3, 6.9, "RKS: 32b Bloom | 16b Digest | 16b Age", size=6.6, bold=True, color="#5B21B6")
+    ctext(13.25, 6.8, "64b RKS: Bloom | Hash | Age", size=5.2, bold=True, color="#5B21B6")
 
-    # ==========================================================================
-    # STAGE 2: Orthogonal Utility-Risk Decomposition (with real 32x32 heatmaps)
-    # ==========================================================================
-    # Subcard 2A: Temporal Innovation c_k
-    draw_card(28.4, 29.2, 22.6, 10.6, fc="#FFFFFF", ec="#0284C7", lw=1.25, r=1.0, shadow=False, z=4)
-    ctext(39.7, 38.3, "Temporal Innovation  $c_k$", size=7.9, bold=True, color="#0369A1")
-    ax.imshow(c_grid, cmap="YlGnBu", extent=(29.3, 35.3, 30.1, 36.7), aspect="auto", zorder=6)
-    ax.add_patch(Rectangle((29.3, 30.1), 6.0, 6.6, fill=False, edgecolor="#0284C7", lw=0.9, zorder=7))
-    ctext(43.0, 33.4, "$1 - \\cos(f_{t,k}, \\bar{f}_{t-1,k})$\n$+ \\|\\Delta f_k\\|_2$\nGates Static Bg", size=6.8, color="#1E293B")
+    # STAGE 2
+    draw_card(28.2, 29.2, 22.8, 10.6, fc="#FFFFFF", ec="#0284C7", lw=0.95, r=1.0, shadow=False, z=4)
+    ctext(39.6, 38.3, "Temporal Innovation $c_k$", size=6.2, bold=True, color="#0369A1")
+    ax.imshow(c_grid, cmap="YlGnBu", extent=(29.1, 35.1, 30.1, 36.7), aspect="auto", zorder=6)
+    ax.add_patch(Rectangle((29.1, 30.1), 6.0, 6.6, fill=False, edgecolor="#0284C7", lw=0.75, zorder=7))
+    ctext(43.0, 33.3, "$1 - \\cos(f_t, \\bar{f}_{t-1})$\n$+ \\|\\Delta f_k\\|_2$\nGates Static Cells", size=5.6, color="#1E293B")
 
-    # Subcard 2B: Pragmatic Utility g_k
-    draw_card(28.4, 16.7, 22.6, 10.6, fc="#FFFFFF", ec="#059669", lw=1.25, r=1.0, shadow=False, z=4)
-    ctext(39.7, 25.8, "Pragmatic Closed-Set Utility  $g_k$", size=7.7, bold=True, color="#047857")
-    ax.imshow(g_grid, cmap="Greens", extent=(29.3, 35.3, 17.6, 24.2), aspect="auto", zorder=6)
-    ax.add_patch(Rectangle((29.3, 17.6), 6.0, 6.6, fill=False, edgecolor="#059669", lw=0.9, zorder=7))
-    ctext(43.0, 20.9, "Scorer $G_\\phi(f_t, \\bar{f}_{t-1})$\n$g_k \\approx \\Delta L_{\\mathrm{known}}$\nRoutine Task Gain", size=6.8, color="#1E293B")
+    draw_card(28.2, 16.7, 22.8, 10.6, fc="#FFFFFF", ec="#059669", lw=0.95, r=1.0, shadow=False, z=4)
+    ctext(39.6, 25.8, "Closed-Set Utility $g_k$", size=6.2, bold=True, color="#047857")
+    ax.imshow(g_grid, cmap="Greens", extent=(29.1, 35.1, 17.6, 24.2), aspect="auto", zorder=6)
+    ax.add_patch(Rectangle((29.1, 17.6), 6.0, 6.6, fill=False, edgecolor="#059669", lw=0.75, zorder=7))
+    ctext(43.0, 20.8, "Scorer $G_\\phi(f_t, \\bar{f}_{t-1})$\n$g_k \\approx \\Delta L_{\\mathrm{known}}$\nRoutine Damage", size=5.6, color="#1E293B")
 
-    # Subcard 2C: Calibrated Open-World Risk p_k
-    draw_card(28.4, 4.2, 22.6, 10.6, fc="#FFF1F2", ec="#E11D48", lw=1.45, r=1.0, shadow=False, z=4)
-    ctext(39.7, 13.3, "Calibrated Collapse Risk  $p_k$", size=7.9, bold=True, color="#BE123C")
-    ax.imshow(p_grid, cmap="magma", extent=(29.3, 35.3, 5.1, 11.7), aspect="auto", zorder=6)
-    ax.add_patch(Rectangle((29.3, 5.1), 6.0, 6.6, fill=False, edgecolor="#E11D48", lw=1.0, zorder=7))
-    ctext(43.1, 8.4, "Prior Contradiction\n+ Entropy + VQ Res.\nIsotonic-Conformal", size=6.8, color="#881337")
+    draw_card(28.2, 4.2, 22.8, 10.6, fc="#FFF1F2", ec="#E11D48", lw=1.1, r=1.0, shadow=False, z=4)
+    ctext(39.6, 13.3, "Calibrated Collapse Risk $p_k$", size=6.2, bold=True, color="#BE123C")
+    ax.imshow(p_grid, cmap="magma", extent=(29.1, 35.1, 5.1, 11.7), aspect="auto", zorder=6)
+    ax.add_patch(Rectangle((29.1, 5.1), 6.0, 6.6, fill=False, edgecolor="#E11D48", lw=0.85, zorder=7))
+    ctext(43.1, 8.3, "Prior Contradiction\n+ Entropy + VQ Res.\nConformal-Isotonic", size=5.6, color="#881337")
 
-    # ==========================================================================
-    # STAGE 3: Two-Stage Epistemic Safety Valve & Utility-per-Bit Allocation
-    # ==========================================================================
-    draw_card(55.0, 23.0, 22.2, 16.8, fc="#FFF7ED", ec="#EA580C", lw=1.55, r=1.1, shadow=False, z=4)
-    ctext(66.1, 38.0, "Stage 3A: Safety Valve  $S_{\\mathrm{safe}}$", size=8.0, bold=True, color="#C2410C")
-    # Budget split visual gauge bar inside 3A
-    ax.add_patch(FancyBboxPatch((56.4, 33.8), 6.2, 2.2, boxstyle="round,pad=0.05,rounding_size=0.4",
-                                facecolor="#EA580C", edgecolor="#9A3412", lw=0.8, zorder=5))
-    ax.add_patch(FancyBboxPatch((62.8, 33.8), 13.0, 2.2, boxstyle="round,pad=0.05,rounding_size=0.4",
-                                facecolor="#DBEAFE", edgecolor="#3B82F6", lw=0.8, zorder=5))
-    ctext(59.5, 34.9, "$S_{\\mathrm{safe}}$", size=6.6, bold=True, color="#FFFFFF")
-    ctext(69.3, 34.9, "Remaining $B_t - R(S_{\\mathrm{safe}})$", size=6.3, bold=True, color="#1D4ED8")
+    # STAGE 3
+    draw_card(54.8, 23.0, 22.4, 16.8, fc="#FFF7ED", ec="#EA580C", lw=1.15, r=1.0, shadow=False, z=4)
+    ctext(66.0, 38.1, "Stage 3A: Safety Valve $S_{\\mathrm{safe}}$", size=6.2, bold=True, color="#C2410C")
+    ax.add_patch(FancyBboxPatch((56.0, 33.8), 6.3, 2.3, boxstyle="round,pad=0.05,rounding_size=0.4",
+                                facecolor="#EA580C", edgecolor="#9A3412", lw=0.65, zorder=5))
+    ax.add_patch(FancyBboxPatch((62.6, 33.8), 13.4, 2.3, boxstyle="round,pad=0.05,rounding_size=0.4",
+                                facecolor="#DBEAFE", edgecolor="#3B82F6", lw=0.65, zorder=5))
+    ctext(59.15, 34.95, "$S_{\\mathrm{safe}}$", size=5.5, bold=True, color="#FFFFFF")
+    ctext(69.3, 34.95, "$B_t - R(S_{\\mathrm{safe}})$", size=5.5, bold=True, color="#1D4ED8")
     ctext(
-        66.1, 28.0,
-        "Mandatory Risk Bound (Prop. 1):\n$\\Sigma_{s_k=0}\\, p_k \\leq \\delta$\nAdmits High $p_k / b_k$ First\nRescues Unseen Collapse!",
-        size=7.0, bold=True, color="#7C2D12", linespacing=1.28
+        66.0, 28.0,
+        "Risk Bound (Prop. 1):\n$\\Sigma_{s_k=0}\\, p_k \\leq \\delta$\nAdmits High $p_k / b_k$ First\nRescues Unseen Collapse",
+        size=5.7, bold=True, color="#7C2D12", linespacing=1.24
     )
 
-    draw_card(55.0, 4.2, 22.2, 16.2, fc="#FFFFFF", ec="#0284C7", lw=1.35, r=1.1, shadow=False, z=4)
-    ctext(66.1, 18.6, "Stage 3B: Utility-per-Bit  $S_{\\mathrm{util}}$", size=7.9, bold=True, color="#0369A1")
+    draw_card(54.8, 4.2, 22.4, 16.2, fc="#FFFFFF", ec="#0284C7", lw=1.0, r=1.0, shadow=False, z=4)
+    ctext(66.0, 18.7, "Stage 3B: Rate-Utility $S_{\\mathrm{util}}$", size=6.2, bold=True, color="#0369A1")
     ctext(
-        66.1, 11.2,
-        "Joint Value Function:\n$v_k = \\alpha g_k + \\beta c_k + \\gamma d_k^{\\mathrm{sync}} + \\eta h(a_k)$\n\nGreedy Rate-Optimal Fill:\nSelect Descending  $\\rho_k = v_k / b_k$\nuntil  $R_t \\leq B_t$",
-        size=6.8, color="#1E293B", linespacing=1.18
+        66.0, 11.2,
+        "Composite Sync Value:\n$v_k = \\alpha g_k + \\beta c_k + \\gamma d_k^{\\mathrm{sync}} + \\eta h(a_k)$\n\nGreedy Rate-Optimal Fill:\nSort by $\\rho_k = v_k / b_k$ ($R_t \\leq B_t$)",
+        size=5.5, color="#1E293B", linespacing=1.18
     )
 
-    # ==========================================================================
-    # STAGE 4: Starlink-Like LEO ISL Relay Mesh & Verifiable Wire Protocol
-    # ==========================================================================
-    draw_card(81.2, 17.6, 22.2, 22.2, fc="#FFFFFF", ec="#059669", lw=1.35, r=1.1, shadow=False, z=4)
-    ctext(92.3, 38.1, "24-Sat Walker-Delta ISL Mesh", size=7.9, bold=True, color="#047857")
-
-    # Curved Earth limb + orbital shell arc
-    earth_arc = Wedge((92.3, 7.1), 13.5, 64, 116, width=1.4, facecolor="#BAE6FD", edgecolor="#0284C7", lw=0.8, alpha=0.50, zorder=4)
+    # STAGE 4
+    draw_card(81.0, 17.6, 22.4, 22.2, fc="#FFFFFF", ec="#059669", lw=1.0, r=1.0, shadow=False, z=4)
+    ctext(92.2, 38.2, "24-Sat Walker-Delta Mesh", size=6.2, bold=True, color="#047857")
+    earth_arc = Wedge((92.2, 7.1), 13.5, 64, 116, width=1.4, facecolor="#BAE6FD", edgecolor="#0284C7", lw=0.65, alpha=0.50, zorder=4)
     ax.add_patch(earth_arc)
     theta_orb = np.linspace(math.radians(52), math.radians(128), 60)
-    ax.plot(92.3 + 22.5 * np.cos(theta_orb), 12.0 + 22.5 * np.sin(theta_orb),
-            color="#94A3B8", linestyle="--", lw=1.0, zorder=4)
+    ax.plot(92.2 + 22.5 * np.cos(theta_orb), 12.0 + 22.5 * np.sin(theta_orb),
+            color="#94A3B8", linestyle="--", lw=0.8, zorder=4)
 
-    # 4 Relay satellites {R_1..R_4} + glowing cyan optical ISL mesh links
-    sat_nodes = [(85.2, 33.4), (99.0, 33.8), (85.8, 23.8), (98.6, 24.2)]
-    isl_edges = [(0, 1), (0, 2), (1, 3), (2, 3), (0, 3), (1, 2)]
-    for u_i, v_i in isl_edges:
+    sat_nodes = [(85.1, 33.3), (98.9, 33.7), (85.7, 23.9), (98.5, 24.3)]
+    for u_i, v_i in [(0, 1), (0, 2), (1, 3), (2, 3), (0, 3), (1, 2)]:
         x_u, y_u = sat_nodes[u_i]
         x_v, y_v = sat_nodes[v_i]
-        ax.plot([x_u, x_v], [y_u, y_v], color="#22D3EE", lw=3.8, alpha=0.28, zorder=5)
-        ax.plot([x_u, x_v], [y_u, y_v], color="#0891B2", lw=1.35, linestyle="-", zorder=6)
+        ax.plot([x_u, x_v], [y_u, y_v], color="#22D3EE", lw=2.8, alpha=0.28, zorder=5)
+        ax.plot([x_u, x_v], [y_u, y_v], color="#0891B2", lw=1.05, linestyle="-", zorder=6)
     for s_idx, (sx_n, sy_n) in enumerate(sat_nodes):
-        draw_sat_icon(sx_n, sy_n, scale=0.88, angle_deg=(18.0 if s_idx % 2 == 0 else -18.0),
+        draw_sat_icon(sx_n, sy_n, scale=0.85, angle_deg=(18.0 if s_idx % 2 == 0 else -18.0),
                       body_c="#1E293B", panel_c="#10B981", z=7)
-    ctext(92.3, 35.8, "Optical Inter-Satellite Links (ISLs)", size=6.5, bold=True, color="#0E7490")
-    ctext(92.3, 19.1, "$S_{\\mathrm{safe}}$ Priority Queue + O(1) Dedup", size=6.5, bold=True, color="#047857",
-          bbox=dict(boxstyle="round,pad=0.12", fc="#FFFFFF", ec="none", alpha=0.88))
+    ctext(92.2, 35.8, "Optical ISL Relay Links", size=5.5, bold=True, color="#0E7490")
+    ctext(92.2, 19.1, "$S_{\\mathrm{safe}}$ Queue + O(1) Dedup", size=5.5, bold=True, color="#047857",
+          bbox=dict(boxstyle="round,pad=0.10", fc="#FFFFFF", ec="none", alpha=0.90))
 
-    # Protocol & Prefix Codec card below mesh
-    draw_card(81.2, 4.2, 22.2, 11.8, fc="#F0FDF4", ec="#16A34A", lw=1.25, r=1.0, shadow=False, z=4)
-    ctext(92.3, 14.3, "Conditional Prefix Wire Codec", size=7.7, bold=True, color="#15803D")
+    draw_card(81.0, 4.2, 22.4, 11.8, fc="#F0FDF4", ec="#16A34A", lw=0.95, r=1.0, shadow=False, z=4)
+    ctext(92.2, 14.3, "2D Spatio-Temp Codec", size=6.2, bold=True, color="#15803D")
     ctext(
-        92.3, 8.8,
-        "$P_\\omega(z_{t,k} \\mid \\bar{z}_{t-1,k}, c_k)$  (5.4-6.4 b/tok)\n- 64-bit RKS Version Check\n- 32-bit root_id Echo Suppression",
-        size=6.7, color="#14532D", linespacing=1.20
+        92.2, 8.7,
+        "$P_\\omega(z_{t,k} \\mid \\bar{z}_{t-1,k}, \\hat{z}_{t,\\mathcal{N}(k)})$ (5.9 b)\n- RKS Digest Verification\n- 32-b root_id Echo Drop",
+        size=5.4, color="#14532D", linespacing=1.20
     )
 
-    # ==========================================================================
-    # STAGE 5: Ground Dish + Idempotent Epistemic State Algebra + Fused Map
-    # ==========================================================================
-    draw_card(107.4, 22.8, 22.2, 17.0, fc="#FFFFFF", ec="#7C3AED", lw=1.35, r=1.1, shadow=False, z=4)
-    ctext(118.5, 38.0, "Consumer $D_j$ & State Algebra", size=7.8, bold=True, color="#5B21B6")
+    # STAGE 5
+    draw_card(107.2, 22.8, 22.6, 17.0, fc="#FFFFFF", ec="#7C3AED", lw=1.0, r=1.0, shadow=False, z=4)
+    ctext(118.5, 38.1, "Consumer $D_j$ State Algebra", size=6.2, bold=True, color="#5B21B6")
+    ax.add_patch(Polygon([(108.5, 31.2), (110.4, 31.2), (109.45, 33.2)], closed=True,
+                         facecolor="#64748B", edgecolor="#1E293B", lw=0.7, zorder=6))
+    ax.add_patch(Wedge((110.1, 34.2), 1.85, 135, 315, facecolor="#DDD6FE", edgecolor="#5B21B6", lw=0.85, zorder=7))
+    ax.plot([109.85, 111.0], [33.95, 35.1], color="#5B21B6", lw=0.9, zorder=8)
+    ax.add_patch(Circle((111.1, 35.2), 0.24, facecolor="#EC4899", edgecolor="#1E293B", lw=0.5, zorder=9))
+    ctext(121.3, 33.9, "Idempotent Union (Prop. 2):\n$M_j \\oplus e \\oplus \\dots \\oplus e = M_j \\oplus e$\n($\\Delta q_{\\mathrm{infl}} = 0.000$)", size=5.1, bold=True, color="#4C1D95")
+    ctext(118.5, 26.2, "- Selected: $\\tilde{z}_{t,k}, q_{t,k}=1.0$\n- Omitted: clip($1 - 0.75 c_k$)", size=5.3, color="#1E293B")
 
-    # Vector parabolic ground dish icon
-    ax.add_patch(Polygon([(109.6, 31.2), (111.8, 31.2), (110.7, 33.4)], closed=True,
-                         facecolor="#64748B", edgecolor="#1E293B", lw=0.9, zorder=6))
-    dish_w = Wedge((111.5, 34.4), 2.2, 135, 315, facecolor="#DDD6FE", edgecolor="#5B21B6", lw=1.1, zorder=7)
-    ax.add_patch(dish_w)
-    ax.plot([111.2, 112.5], [34.1, 35.4], color="#5B21B6", lw=1.2, zorder=8)
-    ax.add_patch(Circle((112.6, 35.5), 0.28, facecolor="#EC4899", edgecolor="#1E293B", lw=0.6, zorder=9))
-    ctext(121.2, 34.2, "Idempotent Union (Prop. 2):\n$M_j \\oplus e \\oplus \\dots \\oplus e = M_j \\oplus e$\n($\\Delta q_{\\mathrm{infl}} = 0.000$)", size=6.5, bold=True, color="#4C1D95")
-    ctext(118.5, 26.3, "- Selected ($s_k=1$): $\\tilde{z}_{t,k}, q_{t,k} = 1.0$\n- Omitted Decay: clip($1 - 0.75 c_k$)", size=6.6, color="#1E293B")
-
-    # Synchronized State Map M_hat_t card with real fused thumbnail
-    draw_card(107.4, 4.2, 22.2, 16.8, fc="#FAF5FF", ec="#4C1D95", lw=1.35, r=1.1, shadow=False, z=4)
-    ctext(118.5, 19.3, "Synchronized State Map  $\\hat{M}_t$", size=7.9, bold=True, color="#4C1D95")
-    ax.imshow(fused_thumb, extent=(108.5, 115.7, 6.2, 16.8), aspect="auto", zorder=6)
-    ax.add_patch(Rectangle((108.5, 6.2), 7.2, 10.6, fill=False, edgecolor="#4C1D95", lw=1.0, zorder=7))
+    draw_card(107.2, 4.2, 22.6, 16.8, fc="#FAF5FF", ec="#4C1D95", lw=1.0, r=1.0, shadow=False, z=4)
+    ctext(118.5, 19.3, "Synchronized Map $\\hat{M}_t$", size=6.2, bold=True, color="#4C1D95")
+    ax.imshow(fused_thumb, extent=(108.3, 115.5, 6.2, 16.8), aspect="auto", zorder=6)
+    ax.add_patch(Rectangle((108.3, 6.2), 7.2, 10.6, fill=False, edgecolor="#4C1D95", lw=0.85, zorder=7))
     ctext(
         122.7, 11.5,
-        "Task Head $T_\\psi(\\hat{M}_t)$\n\n- Routine TP\n  (Green)\n- Rescued Collapse\n  (Gold $S_{\\mathrm{safe}}$!)",
-        size=6.6, bold=True, color="#1E293B", linespacing=1.16
+        "Head $T_\\psi(\\hat{M}_t)$\n- Known TP\n  (Emerald)\n- Rescued $U_{t,k}$\n  (Gold $S_{\\mathrm{safe}}$)",
+        size=5.5, bold=True, color="#1E293B", linespacing=1.16
     )
 
-    # ==========================================================================
-    # Inter-Stage Connecting Arrows
-    # ==========================================================================
-    draw_flow_arrow(24.4, 32.0, 28.4, 34.2, "$F_t, z_t$", color="#1D4ED8", dy=1.35)
-    draw_flow_arrow(24.4, 15.0, 28.4, 21.8, "$\\bar{M}_{t-1}$", color="#475569", dy=1.35)
-    draw_flow_arrow(24.4, 9.5, 28.4, 9.5, "$q_{t-1}$", color="#BE123C", dy=-1.45)
+    # Arrows
+    draw_flow_arrow(24.4, 32.0, 28.2, 34.2, "$F_t, z_t$", color="#1D4ED8", dy=1.45)
+    draw_flow_arrow(24.4, 15.0, 28.2, 21.8, "$\\bar{M}_{t-1}$", color="#475569", dy=1.45)
+    draw_flow_arrow(24.4, 9.5, 28.2, 9.5, "$q_{t-1}$", color="#BE123C", dy=-1.55)
 
-    draw_flow_arrow(51.0, 9.5, 55.0, 29.5, "$p_k$", color="#E11D48", lw=1.8, dy=0.8)
-    draw_flow_arrow(51.0, 34.2, 55.0, 14.5, "$c_k$", color="#0284C7", dy=2.2)
-    draw_flow_arrow(51.0, 21.8, 55.0, 11.5, "$g_k$", color="#059669", dy=-1.4)
-    draw_flow_arrow(66.1, 23.0, 66.1, 20.4, "$S_{\\mathrm{safe}}$ fixed", color="#EA580C", dy=0.0)
+    draw_flow_arrow(51.0, 9.5, 54.8, 29.5, "$p_k$", color="#E11D48", lw=1.35, dy=3.2)
+    draw_flow_arrow(51.0, 34.2, 54.8, 14.5, "$c_k$", color="#0284C7", dy=4.2)
+    draw_flow_arrow(51.0, 21.8, 54.8, 11.5, "$g_k$", color="#059669", dy=-2.6)
+    draw_flow_arrow(66.0, 23.0, 66.0, 20.4, "$S_{\\mathrm{safe}}$", color="#EA580C", dy=0.0)
 
-    draw_flow_arrow(77.2, 31.0, 81.2, 29.0, "$S_{\\mathrm{safe}}$", color="#EA580C", dy=1.35)
-    draw_flow_arrow(77.2, 12.0, 81.2, 10.5, "$S_{\\mathrm{util}}$", color="#0284C7", dy=-1.4)
+    draw_flow_arrow(77.2, 31.0, 81.0, 29.0, "$S_{\\mathrm{safe}}$", color="#EA580C", dy=1.45)
+    draw_flow_arrow(77.2, 12.0, 81.0, 10.5, "$S_{\\mathrm{util}}$", color="#0284C7", dy=-1.5)
 
-    draw_flow_arrow(103.4, 28.5, 107.4, 31.0, "324 B", color="#047857", lw=1.8, dy=1.4)
-    draw_flow_arrow(118.5, 22.8, 118.5, 21.0, "", color="#5B21B6", lw=1.5)
+    draw_flow_arrow(103.4, 28.5, 107.2, 31.0, "324 B", color="#047857", lw=1.35, dy=1.45)
+    draw_flow_arrow(118.5, 22.8, 118.5, 21.0, "", color="#5B21B6", lw=1.15)
 
-    # ==========================================================================
-    # Bottom Full-Width Proportional 324-Byte Wire-Packet & RKS Strip
-    # ==========================================================================
-    draw_card(1.2, -10.8, 129.6, 11.4, fc="#F8FAFC", ec="#94A3B8", lw=1.25, r=1.2, shadow=True, z=2)
+    # Bottom Wire Packet Strip (dynamically read exact measured bit breakdown)
+    ss_wire = res["aggregated_3seed"]["budget_sweep"]["safesync"][3]
+    ob_w = ss_wire["overhead_breakdown_bits"]
+    tot_wb = ob_w["total_bits"]
+    hdr_b = ob_w["header_bits"]
+    msk_b = ob_w["mask_bits"]
+    saf_b = ob_w["safety_meta_bits"]
+    tok_b = ob_w["token_payload_bits"]
+    n_tok_w = ss_wire["mean_selected_tokens"]
+    draw_card(1.0, -10.6, 130.0, 11.2, fc="#F8FAFC", ec="#94A3B8", lw=1.0, r=1.1, shadow=True, z=2)
     ctext(
         66.0, -1.1,
-        "324-Byte Verifiable Wire Packet & 64-Bit RKS Control Handshake  ($R_t = 2{,}592.3$ bits $= 324.0$ B/frame,  99.71% Saving vs. Raw PNG)",
-        size=8.3, bold=True, color="#0F172A", z=5
+        f"324-Byte Verifiable Wire Packet & 64-Bit RKS Handshake ($R_t = {tot_wb:,.1f}$ bits $= {tot_wb/8.0:.1f}$ B/frame, 99.71% Saving vs. Raw PNG)",
+        size=6.7, bold=True, color="#0F172A", z=5
     )
 
-    # Exact measured bit shares at B_t = 2,600 bits: Header 128b (4.9%), Mask 846b (32.6%), Safety 172b (6.6%), Token Payload 1,446b (55.8%) + RKS 64b
     segments = [
-        (2.4, 20.5, "128-bit Header (4.9%)", "'SSYN' | root_id | CRC32", "#FCE7F3", "#BE185D"),
-        (23.6, 30.0, "Spatial Mask $b_{\\mathrm{mask}}$ (32.6%)", "Compressed Grid Mask (846 b)", "#FEF3C7", "#B45309"),
-        (54.3, 19.5, "Safety Meta $b_{\\mathrm{safe}}$ (6.6%)", "$S_{\\mathrm{safe}}$ Flags & Risk (172 b)", "#FFEDD5", "#C2410C"),
-        (74.5, 34.5, "Conditional Prefix VQ Payload $b_{\\mathrm{tok}}$ (55.8%)", "$P_\\omega(z_{t,k} \\mid \\overline{z}_{t-1,k}, c_k)$ Indices (1,446 b, 182.9 tok)", "#DBEAFE", "#1D4ED8"),
-        (109.7, 19.9, "64-bit RKS Handshake", "32b Bloom | 16b Digest | 16b Age", "#EDE9FE", "#6D28D9"),
+        (2.1, 20.8, f"128-b Header ({hdr_b/tot_wb*100:.1f}%)", "'SSYN' | root_id | CRC32", "#FCE7F3", "#BE185D"),
+        (23.6, 29.8, f"Spatial Mask $b_{{\\mathrm{{mask}}}}$ ({msk_b/tot_wb*100:.1f}%)", f"Compressed Bitmap ({msk_b:.0f} b)", "#FEF3C7", "#B45309"),
+        (54.1, 19.8, f"Safety Meta $b_{{\\mathrm{{safe}}}}$ ({saf_b/tot_wb*100:.1f}%)", f"Header-Ord. Risk ({saf_b:.0f} b)", "#FFEDD5", "#C2410C"),
+        (74.6, 34.8, f"2D Causal Prefix Payload $b_{{\\mathrm{{tok}}}}$ ({tok_b/tot_wb*100:.1f}%)", f"$P_\\omega(z_{{t,k}}\\mid\\overline{{z}}_{{t-1,k}},\\hat{{z}}_{{t,\\mathcal{{N}}(k)}})$ ({tok_b:,.0f} b, {n_tok_w:.1f} tok)", "#DBEAFE", "#1D4ED8"),
+        (110.1, 19.8, "64-b RKS Handshake", "Bloom | Hash | Age", "#EDE9FE", "#6D28D9"),
     ]
     for bx, bw, btitle, bsub, bfc, bec in segments:
         fbox = FancyBboxPatch(
-            (bx, -9.8), bw, 6.8,
-            boxstyle="round,pad=0.14,rounding_size=0.8",
-            facecolor=bfc, edgecolor=bec, linewidth=1.25, zorder=4
+            (bx, -9.7), bw, 6.6,
+            boxstyle="round,pad=0.12,rounding_size=0.7",
+            facecolor=bfc, edgecolor=bec, linewidth=0.95, zorder=4
         )
         ax.add_patch(fbox)
-        ctext(bx + bw / 2, -5.0, btitle, size=7.2, bold=True, color=bec, z=6)
-        ctext(bx + bw / 2, -7.9, bsub, size=6.5, color="#1E293B", z=6)
+        ctext(bx + bw / 2, -5.0, btitle, size=5.7, bold=True, color=bec, z=6)
+        ctext(bx + bw / 2, -7.8, bsub, size=5.2, color="#1E293B", z=6)
 
     save_pub_fig(fig, "fig1_safesync_architecture")
 
 
 # ==============================================================================
-# Figure 2: Rate-Task-Sync Pareto Frontier (3 Panels)
+# Figure 2: Rate-Task-Sync Pareto Frontier (Locked 7.16 x 2.40 in 1x3 Grid)
 # ==============================================================================
 def plot_fig2_pareto(res: Dict) -> None:
     agg = res["aggregated_3seed"]
     curves = agg["budget_sweep"]
     full_ref = agg["full_feature_reference"]
 
-    fig, axes = plt.subplots(1, 3, figsize=(11.4, 3.15))
+    fig, axes, x_centers = make_locked_1x3_figure((
+        "(a) Known-Task Utility vs. Rate",
+        "(b) All-Class Sync-F1 vs. Rate",
+        "(c) State Disagreement vs. Rate",
+    ))
+
     plot_order = [
         "current_top_k",
         "stars_adapted",
@@ -503,7 +562,7 @@ def plot_fig2_pareto(res: Dict) -> None:
         sync_std = [p["sync_f1_std"] for p in pts]
         d_sync = [p["state_distortion"] for p in pts]
 
-        lw = 2.3 if m == "safesync" else 1.5
+        lw = 1.85 if m == "safesync" else 1.2
         zorder = 10 if m == "safesync" else 5
         color = PALETTE[m]
         marker = MARKERS[m]
@@ -511,105 +570,112 @@ def plot_fig2_pareto(res: Dict) -> None:
         label = METHOD_LABELS[m]
 
         axes[0].errorbar(rates, known_f1, yerr=known_std, label=label, color=color,
-                         marker=marker, linestyle=ls, linewidth=lw, capsize=2.0, zorder=zorder)
+                         marker=marker, linestyle=ls, linewidth=lw, capsize=1.6, zorder=zorder)
         axes[1].errorbar(rates, sync_f1, yerr=sync_std, label=label, color=color,
-                         marker=marker, linestyle=ls, linewidth=lw, capsize=2.0, zorder=zorder)
+                         marker=marker, linestyle=ls, linewidth=lw, capsize=1.6, zorder=zorder)
         axes[2].plot(rates, d_sync, label=label, color=color,
                      marker=marker, linestyle=ls, linewidth=lw, zorder=zorder)
 
-    axes[0].axhline(full_ref["known_f1"], color="#222222", linestyle="--", linewidth=1.1,
+    axes[0].axhline(full_ref["known_f1"], color="#222222", linestyle="--", linewidth=0.95,
                     label=f"Full VQ Ref ({full_ref['rate_kb_per_frame']:.2f} kb)")
-    axes[1].axhline(full_ref["sync_f1"], color="#222222", linestyle="--", linewidth=1.1,
-                    label=f"Full VQ Ref ({full_ref['rate_kb_per_frame']:.2f} kb)")
+    axes[1].axhline(full_ref["sync_f1"], color="#222222", linestyle="--", linewidth=0.95)
 
-    axes[0].set_xlabel("Application Downlink Rate $R_t$ (kb/frame)")
+    axes[0].set_xlabel("Downlink Rate $R_t$ (kb/frame)")
     axes[0].set_ylabel("Known-Task Mixed F1 (%) $\\uparrow$")
-    axes[0].set_title("(a) Known-Task Utility vs. Rate", fontweight="bold", fontsize=9.8, pad=6)
-
-    axes[1].set_xlabel("Application Downlink Rate $R_t$ (kb/frame)")
+    axes[1].set_xlabel("Downlink Rate $R_t$ (kb/frame)")
     axes[1].set_ylabel("Open-World Sync-F1 (%) $\\uparrow$")
-    axes[1].set_title("(b) All-Class Sync-F1 vs. Rate", fontweight="bold", fontsize=9.8, pad=6)
-
-    axes[2].set_xlabel("Application Downlink Rate $R_t$ (kb/frame)")
+    axes[2].set_xlabel("Downlink Rate $R_t$ (kb/frame)")
     axes[2].set_ylabel("State Distortion $D_{\\mathrm{sync}}$ $\\downarrow$")
-    axes[2].set_title("(c) State Disagreement vs. Rate", fontweight="bold", fontsize=9.8, pad=6)
 
-    ss_pt = curves["safesync"][3]  # 2600 bits
+    ss_pt = curves["safesync"][3]
+    tw_pt = curves["twist_inspired"][3]
+    gain_tw = ss_pt["sync_f1"] - tw_pt["sync_f1"]
     axes[1].annotate(
-        f"SafeSync-Mesh (2.59 kb)\nSync-F1 = {ss_pt['sync_f1']:.1f}%",
+        f"SafeSync (2.59 kb)\n{ss_pt['sync_f1']:.1f}% (+{gain_tw:.1f} vs TWIST)",
         xy=(ss_pt["rate_kb_per_frame"], ss_pt["sync_f1"]),
-        xytext=(4.55, 34.0),
-        arrowprops=dict(arrowstyle="->", color="#0072B2", lw=1.2, connectionstyle="arc3,rad=-0.18"),
-        fontsize=7.5, fontweight="bold", color="#0072B2",
-        bbox=dict(boxstyle="round,pad=0.22", fc="#F0F9FF", ec="#0072B2", lw=0.85)
+        xytext=(3.65, 31.5),
+        arrowprops=dict(arrowstyle="->", color="#0072B2", lw=0.95, connectionstyle="arc3,rad=-0.16"),
+        fontsize=5.9, fontweight="bold", color="#0072B2",
+        bbox=dict(boxstyle="round,pad=0.18", fc="#F0F9FF", ec="#0072B2", lw=0.7)
     )
 
-    for ax in axes:
-        clean_ax(ax)
-
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.12),
-               ncol=4, frameon=True, edgecolor="#CBD5E1", facecolor="#FFFFFF")
-    fig.tight_layout()
+    add_band_legend(fig, handles, labels, x_centers[1], ncol=4, fontsize=6.1, colspacing=0.95)
     save_pub_fig(fig, "fig2_rate_task_pareto")
 
 
 # ==============================================================================
 # Figure 3: Open-World Safety Frontier, Proposition 1 Coverage & Reliability
+#           (Locked 7.16 x 2.40 in 1x3 Grid)
 # ==============================================================================
 def plot_fig3_safety_calibration(res: Dict) -> None:
     agg = res["aggregated_3seed"]
     curves = agg["budget_sweep"]
     cov = agg["delta_coverage_sweep"]
 
-    fig, axes = plt.subplots(1, 3, figsize=(11.4, 3.45))
+    fig, axes, x_centers = make_locked_1x3_figure((
+        "(a) Rate vs. Unknown Miss Rate",
+        "(b) Proposition 1 Risk Coverage",
+        "(c) Risk Reliability Diagram",
+    ))
 
-    safety_methods = [
-        "current_top_k",
-        "stars_adapted",
-        "change_only",
-        "stateful_utility_only",
-        "twist_inspired",
-        "safesync",
-    ]
-    for m in safety_methods:
+    short_names = {
+        "current_top_k": "Top-K",
+        "stars_adapted": "STARS",
+        "change_only": "Change",
+        "stateful_utility_only": "Util-only",
+        "twist_inspired": "TWIST",
+        "safesync": "SafeSync",
+    }
+    for m in ["current_top_k", "stars_adapted", "change_only", "stateful_utility_only", "twist_inspired", "safesync"]:
         pts = curves[m]
         rates = [p["rate_kb_per_frame"] for p in pts]
         miss = [p["u_miss"] for p in pts]
         miss_std = [p["u_miss_std"] for p in pts]
-        lw = 2.3 if m == "safesync" else 1.5
+        lw = 1.85 if m == "safesync" else 1.2
         zorder = 10 if m == "safesync" else 5
-        axes[0].errorbar(rates, miss, yerr=miss_std, label=METHOD_LABELS[m], color=PALETTE[m],
+        axes[0].errorbar(rates, miss, yerr=miss_std, label=short_names[m], color=PALETTE[m],
                          marker=MARKERS[m], linestyle=LINESTYLES[m], linewidth=lw,
-                         capsize=2.0, zorder=zorder)
+                         capsize=1.6, zorder=zorder)
 
-    axes[0].set_xlabel("Application Downlink Rate $R_t$ (kb/frame)")
-    axes[0].set_ylabel("Open-World Unknown Miss (%) $\\downarrow$")
-    axes[0].set_title("(a) Rate vs. Unknown Miss Rate", fontweight="bold", fontsize=9.8, pad=6)
-    axes[0].legend(loc="upper right", frameon=True, fontsize=7.2)
+    axes[0].set_xlabel("Downlink Rate $R_t$ (kb/frame)")
+    axes[0].set_ylabel("Unknown Miss (%) $\\downarrow$")
+    axes[0].set_ylim(-2, 105)
+    ss3 = curves["safesync"][3]
+    tw3 = curves["twist_inspired"][3]
+    axes[0].annotate(
+        f"-{tw3['u_miss'] - ss3['u_miss']:.1f} pp\nvs. TWIST",
+        xy=(ss3["rate_kb_per_frame"], ss3["u_miss"]),
+        xytext=(0.75, 4.5),
+        arrowprops=dict(arrowstyle="->", color="#0072B2", lw=0.9, connectionstyle="arc3,rad=0.14"),
+        fontsize=5.9, fontweight="bold", color="#0072B2",
+        bbox=dict(boxstyle="round,pad=0.15", fc="#F0F9FF", ec="#0072B2", lw=0.65),
+    )
+    h0, l0 = axes[0].get_legend_handles_labels()
+    add_band_legend(fig, h0, l0, x_centers[0], ncol=3, fontsize=5.8, colspacing=0.45, handlelength=1.15)
 
-    # Panel (b): Proposition 1 Requested Risk Target delta vs. Empirical Unknown Event Miss
+    # Panel (b)
     deltas = [c["requested_delta"] * 100.0 for c in cov]
     cal_miss = [c["safesync_calibrated_event_miss"] * 100.0 for c in cov]
     uncal_miss = [c["uncalibrated_event_miss"] * 100.0 for c in cov]
 
-    axes[1].plot([0, 55], [0, 55], color="#475569", linestyle="--", linewidth=1.2,
-                 label="Proposition 1 Bound ($P_{\\mathrm{miss}} = \\delta$)")
-    axes[1].fill_between([0, 55], [0, 0], [0, 55], color="#DCFCE7", alpha=0.38,
-                         label="Valid Coverage Region ($P_{\\mathrm{miss}} \\leq \\delta$)")
+    axes[1].plot([0, 55], [0, 55], color="#475569", linestyle="--", linewidth=1.0,
+                 label="Prop. 1 ($P_{\\mathrm{miss}}=\\delta$)")
+    axes[1].fill_between([0, 55], [0, 0], [0, 55], color="#DCFCE7", alpha=0.40,
+                         label="Valid ($P_{\\mathrm{miss}}\\leq\\delta$)")
     axes[1].plot(deltas, uncal_miss, color="#D55E00", marker="s", linestyle="--",
-                 linewidth=1.8, label="Uncalibrated Raw Score")
+                 linewidth=1.35, label="Uncalibrated")
     axes[1].plot(deltas, cal_miss, color="#0072B2", marker="o", linestyle="-",
-                 linewidth=2.2, label="SafeSync Calibrated $p_k$")
+                 linewidth=1.8, label="Calibrated $p_k$")
 
     axes[1].set_xlim(2, 53)
     axes[1].set_ylim(0, 55)
     axes[1].set_xlabel("Requested Risk Target $\\delta$ (%)")
-    axes[1].set_ylabel("Empirical Scene Unknown Miss (%) $\\downarrow$")
-    axes[1].set_title("(b) Proposition 1 Risk Coverage", fontweight="bold", fontsize=9.8, pad=6)
-    axes[1].legend(loc="upper left", frameon=True, fontsize=7.2)
+    axes[1].set_ylabel("Scene Unknown Miss (%) $\\downarrow$")
+    h1, l1 = axes[1].get_legend_handles_labels()
+    add_band_legend(fig, h1, l1, x_centers[1], ncol=2, fontsize=5.8, colspacing=0.5, handlelength=1.2)
 
-    # Panel (c): Reliability Diagram Before vs. After Calibration
+    # Panel (c)
     bins_raw = agg["reliability_bins_uncalibrated"]
     bins_cal = agg["reliability_bins_calibrated"]
     raw_x = [b["mean_pred"] for b in bins_raw if b["count"] > 10]
@@ -617,38 +683,38 @@ def plot_fig3_safety_calibration(res: Dict) -> None:
     cal_x = [b["mean_pred"] for b in bins_cal if b["count"] > 10]
     cal_y = [b["empirical_rate"] for b in bins_cal if b["count"] > 10]
 
-    axes[2].plot([0, 1], [0, 1], color="#475569", linestyle="--", linewidth=1.2,
-                 label="Ideal Calibration")
-    axes[2].plot(raw_x, raw_y, color="#D55E00", marker="s", linestyle="--", linewidth=1.8,
-                 label=f"Uncalibrated (ECE={agg['ece_uncalibrated_mean']:.3f})")
-    axes[2].plot(cal_x, cal_y, color="#0072B2", marker="o", linestyle="-", linewidth=2.2,
-                 label=f"Calibrated $p_k$ (ECE={agg['ece_calibrated_mean']:.3f})")
+    axes[2].plot([0, 1], [0, 1], color="#475569", linestyle="--", linewidth=1.0, label="Ideal")
+    axes[2].plot(raw_x, raw_y, color="#D55E00", marker="s", linestyle="--", linewidth=1.35,
+                 label=f"Raw (ECE={agg['ece_uncalibrated_mean']:.2f})")
+    axes[2].plot(cal_x, cal_y, color="#0072B2", marker="o", linestyle="-", linewidth=1.8,
+                 label=f"Calib. (ECE={agg['ece_calibrated_mean']:.2f})")
 
     axes[2].set_xlim(0, 0.98)
     axes[2].set_ylim(0, 0.98)
     axes[2].set_xlabel("Predicted Open-World Risk $p_k$")
-    axes[2].set_ylabel("Empirical Unknown Collapse Frequency")
-    axes[2].set_title("(c) Risk Reliability Diagram", fontweight="bold", fontsize=9.8, pad=6)
-    axes[2].legend(loc="upper left", frameon=True, fontsize=7.2)
+    axes[2].set_ylabel("Empirical Collapse Freq.")
+    h2, l2 = axes[2].get_legend_handles_labels()
+    add_band_legend(fig, h2, l2, x_centers[2], ncol=2, fontsize=5.8, colspacing=0.45, handlelength=1.15)
 
-    for ax in axes:
-        clean_ax(ax)
-
-    fig.tight_layout()
     save_pub_fig(fig, "fig3_openworld_safety_calibration")
 
 
 # ==============================================================================
-# Figure 4: State Age, Multi-Skip Bridge & Misregistration Resilience (1x3 Grid)
+# Figure 4: State Age, Multi-Skip Bridge & Misregistration Resilience
+#           (Locked 7.16 x 2.40 in 1x3 Grid)
 # ==============================================================================
 def plot_fig4_temporal_and_registration(res: Dict) -> None:
     sn7 = res["spacenet7_temporal_and_bridge"]["state_age_sweep"]
     bridge = res["spacenet7_temporal_and_bridge"]["r33_to_r36_architectural_bridge"]
     reg = res["aggregated_3seed"]["registration_stress"]
 
-    fig, axes = plt.subplots(1, 3, figsize=(11.4, 3.45))
+    fig, axes, x_centers = make_locked_1x3_figure((
+        "(a) SpaceNet-7 State Age Sweep",
+        "(b) Multi-Skip vs. Bottleneck VQ",
+        "(c) Misregistration & Refresh",
+    ))
 
-    # Panel (a): SpaceNet-7 State Age vs. Rate & Task F1
+    # Panel (a)
     ages = [p["dt_months"] for p in sn7]
     ss_rates = [p["rate_kb_per_window"] for p in sn7]
     ss_f1 = [p["pixel_f1_pct"] for p in sn7]
@@ -658,31 +724,25 @@ def plot_fig4_temporal_and_registration(res: Dict) -> None:
     ax1_r = ax1.twinx()
     ax1_r.spines["top"].set_visible(False)
 
-    l1 = ax1.plot(ages, ss_f1, color="#0072B2", marker="o", linestyle="-", linewidth=2.2,
-                  label="Building F1 (%)")
-    l2 = ax1.plot(ages, new_rec, color="#009E73", marker="^", linestyle="-.", linewidth=1.8,
-                  label="New-Bldg Recall (%)")
-    b1 = ax1_r.bar(ages, ss_rates, width=0.52, color="#0072B2", alpha=0.22,
-                   label="Adaptive Rate (kb)")
+    l1 = ax1.plot(ages, ss_f1, color="#0072B2", marker="o", linestyle="-", linewidth=1.8, label="Bldg F1 (%)")
+    l2 = ax1.plot(ages, new_rec, color="#009E73", marker="^", linestyle="-.", linewidth=1.45, label="New Recall")
+    b1 = ax1_r.bar(ages, ss_rates, width=0.50, color="#0072B2", alpha=0.22, label="Rate (kb)")
 
     ax1.set_xticks(ages)
-    ax1.set_xticklabels([f"$\\Delta t={a}$m" for a in ages])
+    ax1.set_xticklabels([f"{a} mo" for a in ages])
+    ax1.set_xlim(0.4, 5.6)
     ax1.set_xlabel("SpaceNet-7 State Age $\\Delta t$")
-    ax1.set_ylabel("Building F1 / Recall (%) $\\uparrow$", color="#0F172A")
-    ax1_r.set_ylabel("Rate $R_t$ (kb/win)", color="#475569")
-    ax1.set_ylim(18, 79)
-    ax1_r.set_ylim(0, 15.2)
+    ax1.set_ylabel("F1 / Recall (%) $\\uparrow$", color="#0F172A")
+    ax1_r.set_ylabel("Rate $R_t$ (kb)", color="#475569")
+    ax1.set_ylim(34, 78)
+    ax1_r.set_ylim(0, max(12.5, max(ss_rates) * 1.45))
     for a_val, r_val in zip(ages, ss_rates):
         ax1_r.text(a_val, r_val + 0.30, f"{r_val:.1f}kb", ha="center", va="bottom",
-                   fontsize=7.6, fontweight="bold", color="#334155")
-    ax1.set_title("(a) SpaceNet-7 State Age Sweep", fontweight="bold", fontsize=9.8, pad=6)
+                   fontsize=6.1, fontweight="bold", color="#334155")
+    h_a = l1 + l2 + [b1]
+    add_band_legend(fig, h_a, [x.get_label() for x in h_a], x_centers[0], ncol=2, fontsize=5.8)
 
-    lines = l1 + l2 + [b1]
-    labels = [l.get_label() for l in lines]
-    ax1.legend(lines, labels, loc="center left", bbox_to_anchor=(0.02, 0.56), frameon=True, fontsize=7.4)
-    clean_ax(ax1)
-
-    # Panel (b): SpaceNet-7 Multi-Skip vs. Stage-2 Bottleneck VQ Bridge
+    # Panel (b)
     axb = axes[1]
     axb_r = axb.twinx()
     axb_r.spines["top"].set_visible(False)
@@ -708,27 +768,26 @@ def plot_fig4_temporal_and_registration(res: Dict) -> None:
     ]
     xb = np.arange(len(b_names))
     bar_colors = ["#94A3B8", "#CBD5E1", "#FCA5A5", "#93C5FD"]
-    bars_b = axb_r.bar(xb, np.log10(b_kb), width=0.48, color=bar_colors, edgecolor="#475569", alpha=0.55,
-                       label="$\\log_{10}$(KB, 2 win)")
-    lb1 = axb.plot(xb, b_f1, color="#0072B2", marker="o", linewidth=2.1, label="Building F1 (%)")
-    lb2 = axb.plot(xb, b_rec, color="#D55E00", marker="s", linestyle="--", linewidth=1.9, label="New Recall (%)")
+    bars_b = axb_r.bar(xb, np.log10(b_kb), width=0.46, color=bar_colors, edgecolor="#475569", linewidth=0.6, alpha=0.55,
+                       label="$\\log_{10}$(KB)")
+    lb1 = axb.plot(xb, b_f1, color="#0072B2", marker="o", linewidth=1.75, label="Bldg F1 (%)")
+    lb2 = axb.plot(xb, b_rec, color="#D55E00", marker="s", linestyle="--", linewidth=1.5, label="New Recall")
     axb.set_xticks(xb)
-    axb.set_xticklabels(b_names, fontsize=8.2)
+    axb.set_xticklabels(b_names, fontsize=6.4)
     axb.set_xlabel("Two-Window Representation")
-    axb.set_ylabel("F1 / Emergence Recall (%) $\\uparrow$")
+    axb.set_ylabel("F1 / Recall (%) $\\uparrow$")
     axb_r.set_ylabel("$\\log_{10}$ Payload (KB) $\\downarrow$", color="#475569")
     axb.set_ylim(0, 84)
-    axb_r.set_ylim(-0.3, 5.3)
-    axb.annotate("1.12 KB\n(28,830x)", xy=(3, b_rec[3]), xytext=(2.05, 47.0),
-                 arrowprops=dict(arrowstyle="->", color="#0072B2", lw=1.1),
-                 fontsize=7.4, fontweight="bold", color="#0072B2",
-                 bbox=dict(boxstyle="round,pad=0.18", fc="#EFF6FF", ec="#0072B2", lw=0.8))
-    axb.set_title("(b) Multi-Skip vs. Bottleneck VQ", fontweight="bold", fontsize=9.8, pad=6)
-    lines_m = lb1 + lb2 + [bars_b]
-    axb.legend(lines_m, [l.get_label() for l in lines_m], loc="upper right", bbox_to_anchor=(0.99, 0.87), frameon=True, fontsize=6.9)
-    clean_ax(axb)
+    axb_r.set_ylim(-0.3, 5.2)
+    ratio_int = int(round(bridge["compression_ratio_vs_r33_fp16_skips"]))
+    axb.annotate(f"{b_kb[3]:.2f} KB\n({ratio_int:,}x)", xy=(3, b_rec[3]), xytext=(1.22, 51.5),
+                 arrowprops=dict(arrowstyle="->", color="#0072B2", lw=0.9, connectionstyle="arc3,rad=-0.10"),
+                 fontsize=5.8, fontweight="bold", color="#0072B2",
+                 bbox=dict(boxstyle="round,pad=0.15", fc="#EFF6FF", ec="#0072B2", lw=0.65))
+    h_b = lb1 + lb2 + [bars_b]
+    add_band_legend(fig, h_b, [x.get_label() for x in h_b], x_centers[1], ncol=2, fontsize=5.8)
 
-    # Panel (c): Registration Perturbation sigma_reg in {0, 2, 4, 8} px
+    # Panel (c)
     sigmas = [p["registration_shift_px"] for p in reg]
     adapt_f1 = [p["safesync_adaptive_sync_f1"] for p in reg]
     static_f1 = [p["static_utility_sync_f1"] for p in reg]
@@ -738,40 +797,35 @@ def plot_fig4_temporal_and_registration(res: Dict) -> None:
     ax2_r = ax2.twinx()
     ax2_r.spines["top"].set_visible(False)
 
-    m1 = ax2.plot(sigmas, adapt_f1, color="#0072B2", marker="o", linestyle="-", linewidth=2.2,
-                  label="SafeSync w/ Refresh")
-    m2 = ax2.plot(sigmas, static_f1, color="#D55E00", marker="s", linestyle="--", linewidth=1.8,
-                  label="Static Prior Reuse")
-    m3 = ax2_r.plot(sigmas, adapt_rate, color="#009E73", marker="^", linestyle="-.", linewidth=1.8,
-                    label="Adaptive Rate (kb)")
+    m1 = ax2.plot(sigmas, adapt_f1, color="#0072B2", marker="o", linestyle="-", linewidth=1.8, label="SafeSync")
+    m2 = ax2.plot(sigmas, static_f1, color="#D55E00", marker="s", linestyle="--", linewidth=1.45, label="Static Reuse")
+    m3 = ax2_r.plot(sigmas, adapt_rate, color="#009E73", marker="^", linestyle="-.", linewidth=1.45, label="Rate (kb)")
 
     for s, r in zip(sigmas, adapt_rate):
         if s >= 2:
             ax2_r.annotate(f"{r:.1f}kb", xy=(s, r),
-                           xytext=(s - 0.75, r + 0.55),
-                           fontsize=7.4, fontweight="bold", color="#009E73",
-                           bbox=dict(boxstyle="round,pad=0.10", fc="white", ec="none", alpha=0.85))
+                           xytext=(s - 0.85, r + 0.55),
+                           fontsize=5.9, fontweight="bold", color="#009E73",
+                           bbox=dict(boxstyle="round,pad=0.08", fc="white", ec="none", alpha=0.85))
 
     ax2.set_xticks(sigmas)
     ax2.set_xticklabels([f"{s}px" for s in sigmas])
     ax2.set_xlabel("Misregistration $\\sigma_{\\mathrm{reg}}$ (Pixels)")
-    ax2.set_ylabel("Open-World Sync-F1 (%) $\\uparrow$", color="#0F172A")
-    ax2_r.set_ylabel("Rate $R_t$ (kb/frame)", color="#009E73")
-    ax2.set_ylim(48, 76)
-    ax2_r.set_ylim(1.0, 9.4)
-    ax2.set_title("(c) Misregistration & Refresh", fontweight="bold", fontsize=9.8, pad=6)
+    ax2.set_ylabel("Sync-F1 (%) $\\uparrow$", color="#0F172A")
+    ax2_r.set_ylabel("Rate $R_t$ (kb)", color="#009E73")
+    ymin_c = min(min(static_f1), min(adapt_f1)) - 4.0
+    ymax_c = max(max(static_f1), max(adapt_f1)) + 4.0
+    ax2.set_ylim(ymin_c, ymax_c)
+    ax2_r.set_ylim(1.0, max(9.4, max(adapt_rate) + 1.5))
+    h_c = m1 + m2 + m3
+    add_band_legend(fig, h_c, [x.get_label() for x in h_c], x_centers[2], ncol=2, fontsize=5.8)
 
-    lines2 = m1 + m2 + m3
-    labels2 = [l.get_label() for l in lines2]
-    ax2.legend(lines2, labels2, loc="lower right", frameon=True, fontsize=7.2)
-    clean_ax(ax2)
-
-    fig.tight_layout()
     save_pub_fig(fig, "fig4_state_age_and_registration_drift")
 
 
 # ==============================================================================
-# Figure 5: Overhead Decomposition, Rician Fading & Reserve Sensitivity (1x3 Grid)
+# Figure 5 (Paper Fig. 6): Overhead Decomposition, Rician Fading & Reserve
+#           (Locked 7.16 x 2.40 in 1x3 Grid)
 # ==============================================================================
 def plot_fig5_overhead_and_channel(res: Dict) -> None:
     agg = res["aggregated_3seed"]
@@ -779,9 +833,13 @@ def plot_fig5_overhead_and_channel(res: Dict) -> None:
     ch = agg["channel_robustness_sweep"]
     rho_sw = res["full_system_ablation_and_sensitivity"]["safety_reserve_ratio_sweep"]
 
-    fig, axes = plt.subplots(1, 3, figsize=(11.4, 3.45))
+    fig, axes, x_centers = make_locked_1x3_figure((
+        "(a) Wire-Level Bit Accounting",
+        "(b) Rician Fading Resilience",
+        "(c) Safety Reserve Sensitivity",
+    ))
 
-    # Panel (a): Overhead Decomposition across budgets
+    # Panel (a)
     x_labels = [f"{p['rate_kb_per_frame']:.1f}" for p in ss_pts]
     x = np.arange(len(ss_pts))
     tot = np.array([p["overhead_breakdown_bits"]["total_bits"] for p in ss_pts])
@@ -792,54 +850,54 @@ def plot_fig5_overhead_and_channel(res: Dict) -> None:
     useful_pct = tok_pct + saf_pct
 
     ax1 = axes[0]
-    ax1.bar(x, tok_pct, width=0.58, label="Token ($b_{\\mathrm{tok}}$)", color="#0072B2")
-    ax1.bar(x, saf_pct, width=0.58, bottom=tok_pct, label="Safety ($b_{\\mathrm{safe}}$)", color="#009E73")
-    ax1.bar(x, msk_pct, width=0.58, bottom=tok_pct + saf_pct, label="Mask ($b_{\\mathrm{mask}}$)", color="#E69F00")
-    ax1.bar(x, hdr_pct, width=0.58, bottom=tok_pct + saf_pct + msk_pct, label="Header ($b_{\\mathrm{hdr}}$)", color="#CC79A7")
-    ax1.plot(x, useful_pct, color="#111827", marker="o", linewidth=1.8, linestyle="--",
-             label="Evidence (%)")
+    ax1.bar(x, tok_pct, width=0.58, label="Token", color="#0072B2")
+    ax1.bar(x, saf_pct, width=0.58, bottom=tok_pct, label="Safety", color="#009E73")
+    ax1.bar(x, msk_pct, width=0.58, bottom=tok_pct + saf_pct, label="Mask", color="#E69F00")
+    ax1.bar(x, hdr_pct, width=0.58, bottom=tok_pct + saf_pct + msk_pct, label="Hdr", color="#CC79A7")
+    ax1.plot(x, useful_pct, color="#111827", marker="o", markersize=3.2, linewidth=1.35, linestyle="--", label="Evid.")
 
     ax1.set_xticks(x)
-    ax1.set_xticklabels(x_labels)
-    ax1.set_ylim(0, 108)
+    ax1.set_xticklabels(x_labels, fontsize=6.1)
+    ax1.set_ylim(0, 105)
     ax1.set_xlabel("Downlink Rate $R_t$ (kb/frame)")
     ax1.set_ylabel("Wire-Frame Bit Share (%)")
-    ax1.set_title("(a) Wire-Level Bit Accounting", fontweight="bold", fontsize=9.8, pad=6)
-    ax1.legend(loc="lower right", frameon=True, fontsize=6.9, ncol=2, columnspacing=0.6)
-    clean_ax(ax1)
+    ha1, la1 = ax1.get_legend_handles_labels()
+    add_band_legend(fig, ha1, la1, x_centers[0], ncol=3, fontsize=5.8, colspacing=0.45, handlelength=1.1)
 
-    # Panel (b): Rician SNR Robustness
+    # Panel (b): Clean Single-Axis Open-World Sync-F1 vs. Rician Fading SNR (4-16 dB)
     ch_sorted = sorted(ch, key=lambda item: item["rician_snr_db"])
     snrs = [c["rician_snr_db"] for c in ch_sorted]
     ss_f1 = [c["safesync"]["sync_f1"] for c in ch_sorted]
     tw_f1 = [c["twist_inspired"]["sync_f1"] for c in ch_sorted]
+    ut_f1 = [c["stateful_utility_only"]["sync_f1"] for c in ch_sorted]
     st_f1 = [c["stars_adapted"]["sync_f1"] for c in ch_sorted]
-    ss_miss = [c["safesync"]["u_miss"] for c in ch_sorted]
-    ut_miss = [c["stateful_utility_only"]["u_miss"] for c in ch_sorted]
+    tk_f1 = [c["current_top_k"]["sync_f1"] for c in ch_sorted]
 
     ax2 = axes[1]
-    ax2_r = ax2.twinx()
-    ax2_r.spines["top"].set_visible(False)
+    p1 = ax2.plot(snrs, ss_f1, color="#0072B2", marker="o", linestyle="-", linewidth=1.9, label="SafeSync", zorder=10)
+    p2 = ax2.plot(snrs, ut_f1, color="#009E73", marker="^", linestyle="-.", linewidth=1.35, label="Util-only", zorder=6)
+    p3 = ax2.plot(snrs, tw_f1, color="#D55E00", marker="s", linestyle="--", linewidth=1.35, label="TWIST", zorder=6)
+    p4 = ax2.plot(snrs, st_f1, color="#E69F00", marker="v", linestyle="--", linewidth=1.25, label="STARS", zorder=5)
+    p5 = ax2.plot(snrs, tk_f1, color="#56B4E9", marker="P", linestyle=":", linewidth=1.25, label="Top-K", zorder=5)
 
-    p1 = ax2.plot(snrs, ss_f1, color="#0072B2", marker="o", linestyle="-", linewidth=2.2, label="SafeSync F1")
-    p2 = ax2.plot(snrs, tw_f1, color="#D55E00", marker="s", linestyle="--", linewidth=1.6, label="TWIST F1")
-    p3 = ax2.plot(snrs, st_f1, color="#E69F00", marker="v", linestyle="--", linewidth=1.6, label="STARS F1")
-    p4 = ax2_r.plot(snrs, ss_miss, color="#0072B2", marker="o", linestyle=":", linewidth=1.8, label="SafeSync Miss")
-    p5 = ax2_r.plot(snrs, ut_miss, color="#009E73", marker="^", linestyle=":", linewidth=1.8, label="Util-Only Miss")
+    gain_4db = ss_f1[0] - max(tw_f1[0], ut_f1[0])
+    ax2.annotate(
+        f"+{gain_4db:.1f} pp @ 4 dB",
+        xy=(snrs[0], ss_f1[0]),
+        xytext=(snrs[0] + 2.3, ss_f1[0] + 5.8),
+        arrowprops=dict(arrowstyle="->", color="#0072B2", lw=0.9, connectionstyle="arc3,rad=0.15"),
+        fontsize=5.8, fontweight="bold", color="#0072B2",
+        bbox=dict(boxstyle="round,pad=0.14", fc="#F0F9FF", ec="#0072B2", lw=0.65),
+    )
 
-    ax2.set_xlabel("Rician Channel SNR (dB) ($K=6$ dB)")
+    ax2.set_xticks(snrs)
+    ax2.set_xlabel("Rician SNR (dB) ($K=6$ dB)")
     ax2.set_ylabel("Open-World Sync-F1 (%) $\\uparrow$", color="#0F172A")
-    ax2_r.set_ylabel("Unknown Miss (%) $\\downarrow$", color="#475569")
-    ax2.set_ylim(27, 75)
-    ax2_r.set_ylim(-14, 82)
-    ax2.set_title("(b) Rician Fading Resilience", fontweight="bold", fontsize=9.8, pad=6)
+    ax2.set_ylim(max(18, min(tk_f1) - 4), max(ss_f1) + 10.5)
+    hb2 = p1 + p2 + p3 + p4 + p5
+    add_band_legend(fig, hb2, [item.get_label() for item in hb2], x_centers[1], ncol=3, fontsize=5.7, colspacing=0.42, handlelength=1.1)
 
-    lines_b = p1 + p2 + p3 + p4 + p5
-    ax2.legend(lines_b, [l.get_label() for l in lines_b], loc="lower left", bbox_to_anchor=(0.01, 0.01),
-               ncol=2, frameon=True, fontsize=6.8, columnspacing=0.6)
-    clean_ax(ax2)
-
-    # Panel (c): Safety Reserve Cap rho_safe Trade-off Curve
+    # Panel (c)
     ax3 = axes[2]
     ax3_r = ax3.twinx()
     ax3_r.spines["top"].set_visible(False)
@@ -849,32 +907,30 @@ def plot_fig5_overhead_and_channel(res: Dict) -> None:
     r_kf1 = [r["known_f1"] for r in rho_sw]
     r_umiss = [r["u_miss"] for r in rho_sw]
 
-    s1 = ax3.plot(rhos, r_kf1, color="#009E73", marker="^", linestyle="--", linewidth=1.7, label="Known-Task F1")
-    s2 = ax3.plot(rhos, r_sf1, color="#0072B2", marker="o", linestyle="-", linewidth=2.2, label="All-Class Sync-F1")
-    s3 = ax3_r.plot(rhos, r_umiss, color="#D55E00", marker="s", linestyle="-.", linewidth=1.9, label="Unknown Miss $\\downarrow$")
-    ax3.axvline(0.25, color="#0072B2", linestyle=":", linewidth=1.2, alpha=0.8)
-    ax3.annotate("$\\rho_{\\mathrm{safe}}=0.25$\nPareto Knee", xy=(0.25, 63.15), xytext=(0.28, 64.9),
-                 arrowprops=dict(arrowstyle="->", color="#0072B2", lw=1.0),
-                 fontsize=7.3, fontweight="bold", color="#0072B2",
-                 bbox=dict(boxstyle="round,pad=0.16", fc="#EFF6FF", ec="#0072B2", lw=0.75))
+    s1 = ax3.plot(rhos, r_kf1, color="#009E73", marker="^", linestyle="--", linewidth=1.35, label="Known F1")
+    s2 = ax3.plot(rhos, r_sf1, color="#0072B2", marker="o", linestyle="-", linewidth=1.8, label="Sync-F1")
+    s3 = ax3_r.plot(rhos, r_umiss, color="#D55E00", marker="s", linestyle="-.", linewidth=1.5, label="U-Miss $\\downarrow$")
+    ax3.axvline(0.25, color="#0072B2", linestyle=":", linewidth=1.0, alpha=0.85)
+    knee_sf1 = r_sf1[3]
+    ax3.annotate("$\\rho_{\\mathrm{safe}}=0.25$", xy=(0.25, knee_sf1), xytext=(0.275, 62.6),
+                 arrowprops=dict(arrowstyle="->", color="#0072B2", lw=0.85),
+                 fontsize=5.8, fontweight="bold", color="#0072B2",
+                 bbox=dict(boxstyle="round,pad=0.14", fc="#EFF6FF", ec="#0072B2", lw=0.6))
 
     ax3.set_xlabel("Safety Reserve Cap $\\rho_{\\mathrm{safe}}$")
     ax3.set_ylabel("Known / Sync-F1 (%) $\\uparrow$")
-    ax3_r.set_ylabel("Unknown Miss (%) $\\downarrow$", color="#D55E00")
-    ax3.set_ylim(56.5, 71.0)
-    ax3_r.set_ylim(25.0, 70.0)
-    ax3.set_title("(c) Safety Reserve Sensitivity", fontweight="bold", fontsize=9.8, pad=6)
+    ax3_r.set_ylabel("U-Miss (%) $\\downarrow$", color="#D55E00")
+    ax3.set_ylim(58.8, 71.8)
+    ax3_r.set_ylim(17.5, 51.0)
+    hc3 = s1 + s2 + s3
+    add_band_legend(fig, hc3, [item.get_label() for item in hc3], x_centers[2], ncol=2, fontsize=5.8)
 
-    lines_c = s1 + s2 + s3
-    ax3.legend(lines_c, [l.get_label() for l in lines_c], loc="lower left", frameon=True, fontsize=7.0)
-    clean_ax(ax3)
-
-    fig.tight_layout()
     save_pub_fig(fig, "fig5_overhead_and_channel_robustness")
 
 
 # ==============================================================================
-# Figure 6: Qualitative Evidence & TP/FN Error Overlay Maps (IEEE TGRS 6-Col)
+# Figure 6 (Paper Fig. 7): Qualitative Evidence & TP/FN Error Overlay Maps
+#           (Native 7.16 x 2.60 in Full-Width 2x6 Grid)
 # ==============================================================================
 def plot_fig6_qualitative() -> None:
     xbd_npz = np.load(CACHE_DIR / "xbd_safesync_tokens_440.npz")
@@ -886,10 +942,6 @@ def plot_fig6_qualitative() -> None:
     loc_p = xbd_npz["loc_prior_prob"].astype(np.float32)
     logits_curr = xbd_npz["logits_curr_cell"].astype(np.float32)
     cell_gt = xbd_npz["cell_gt_counts"].astype(np.int32)
-
-    # Pick 2 representative Test-OpenWorld scenes with both known damage and unknown collapse (U_{t,k}=1)
-    import io
-    import pyarrow.parquet as pq
 
     candidates = []
     for idx, meta in enumerate(scenes):
@@ -913,16 +965,37 @@ def plot_fig6_qualitative() -> None:
         if len(loaded_imgs) == len(wanted_names):
             break
 
-    fig, axes = plt.subplots(2, 6, figsize=(11.4, 3.95))
+    fig_h = 2.62
+    fig = plt.figure(figsize=(IEEE_TEXTWIDTH_IN, fig_h), facecolor="#FFFFFF")
+
+    tile_in = 1.00
+    w_n = tile_in / IEEE_TEXTWIDTH_IN
+    h_n = tile_in / fig_h
+    x0_in = 0.30
+    dx_in = 0.058
+    row_y_in = [1.36, 0.30]
+
     col_titles = [
-        "(a) Prior Reference $X_{t-1}$",
-        "(b) Post-Event $X_t$ & $U_{t,k}$",
-        "(c) Utility $g_k$ vs. Risk $p_k$",
-        "(d) Utility-Only Error Map",
-        "(e) SafeSync-Mesh Error Map",
-        "(f) State Confidence $q_{t,k}$",
+        "(a) Prior $X_{t-1}$",
+        "(b) Post $X_t$ & $U_{t,k}$",
+        "(c) $g_k$ vs. Risk $p_k$",
+        "(d) Utility-Only Error",
+        "(e) SafeSync Error",
+        "(f) Confidence $q_{t,k}$",
     ]
 
+    axes = [[None for _ in range(6)] for _ in range(2)]
+    for r_i in range(2):
+        for c_i in range(6):
+            xi = (x0_in + c_i * (tile_in + dx_in)) / IEEE_TEXTWIDTH_IN
+            yi = row_y_in[r_i] / fig_h
+            ax = fig.add_axes([xi, yi, w_n, h_n])
+            axes[r_i][c_i] = ax
+            if r_i == 0:
+                fig.text(xi + 0.5 * w_n, 2.46 / fig_h, col_titles[c_i],
+                         ha="center", va="center", fontsize=7.2, fontweight="bold", color="#0F172A")
+
+    im_q = None
     for row, idx in enumerate(chosen_indices):
         meta = scenes[idx]
         t1_b, t2_b = loaded_imgs[meta["image_name"]]
@@ -948,26 +1021,25 @@ def plot_fig6_qualitative() -> None:
         p_grid = p_risk.reshape(32, 32)
         c_grid = c_map.reshape(32, 32)
 
-        axes[row, 0].imshow(pre_img)
-        axes[row, 0].set_ylabel(f"{meta['event']}\n({meta['image_name'].split('_')[-1]})",
-                                fontsize=7.8, fontweight="bold")
+        axes[row][0].imshow(pre_img)
+        axes[row][0].set_ylabel(f"{meta['event']}\n({meta['image_name'].split('_')[-1]})",
+                                fontsize=6.5, fontweight="bold", labelpad=3)
 
-        axes[row, 1].imshow(post_img)
+        axes[row][1].imshow(post_img)
         for r in range(32):
             for c in range(32):
                 if u_grid[r, c]:
-                    rect = mpatches.Rectangle((c * 8, r * 8), 8, 8, linewidth=1.0,
+                    rect = mpatches.Rectangle((c * 8, r * 8), 8, 8, linewidth=0.8,
                                               edgecolor="#EF4444", facecolor="none")
-                    axes[row, 1].add_patch(rect)
+                    axes[row][1].add_patch(rect)
 
         comp = np.zeros((32, 32, 3), dtype=np.float32)
         comp[:, :, 0] = np.clip(p_grid / (p_grid.max() + 1e-6), 0, 1)
         comp[:, :, 1] = np.clip(g_grid / (g_grid.max() + 1e-6), 0, 1)
         comp[:, :, 2] = np.clip(0.35 * c_grid, 0, 1)
-        axes[row, 2].imshow(comp, interpolation="nearest")
+        axes[row][2].imshow(comp, interpolation="nearest")
 
         k_budget = 190
-        # Closed-set utility-only scorer ignores unfamiliar collapse tokens where closed-set confidence is low
         g_closed_only = g_map * np.where(u_vec, 0.18, 1.0)
         util_sel = set(np.argsort(-g_closed_only)[:k_budget].tolist())
         safe_sel = set(np.where(u_vec)[0].tolist()) | set(np.argsort(-p_risk)[:36].tolist())
@@ -975,7 +1047,6 @@ def plot_fig6_qualitative() -> None:
         rem_cands = [k for k in np.argsort(-g_map).tolist() if k not in safe_sel]
         ss_sel = safe_sel | set(rem_cands[:rem_budget])
 
-        # Column (d): Utility-Only Error Overlay on darkened post-disaster image
         base_dark = (post_img.astype(np.float32) / 255.0) * 0.42
         util_err_img = base_dark.copy()
         ss_err_img = base_dark.copy()
@@ -987,10 +1058,8 @@ def plot_fig6_qualitative() -> None:
                 if k in util_sel:
                     util_err_img[r0:r1, c0:c1] = 0.35 * base_dark[r0:r1, c0:c1] + 0.65 * np.array([0.96, 0.62, 0.04])
                 else:
-                    # Closed-Set Prior Hallucination (Omitted Unknown Collapse FN)
                     util_err_img[r0:r1, c0:c1] = 0.25 * base_dark[r0:r1, c0:c1] + 0.75 * np.array([0.93, 0.18, 0.32])
                 if k in ss_sel:
-                    # Rescued by Epistemic Safety Valve S_safe (TP Rescue)
                     ss_err_img[r0:r1, c0:c1] = 0.25 * base_dark[r0:r1, c0:c1] + 0.75 * np.array([0.98, 0.68, 0.05])
             elif k_vec[k] or (k in util_sel and k in ss_sel):
                 if k in util_sel:
@@ -998,8 +1067,8 @@ def plot_fig6_qualitative() -> None:
                 if k in ss_sel:
                     ss_err_img[r0:r1, c0:c1] = 0.40 * base_dark[r0:r1, c0:c1] + 0.60 * np.array([0.08, 0.72, 0.50])
 
-        axes[row, 3].imshow(np.clip(util_err_img, 0, 1))
-        axes[row, 4].imshow(np.clip(ss_err_img, 0, 1))
+        axes[row][3].imshow(np.clip(util_err_img, 0, 1))
+        axes[row][4].imshow(np.clip(ss_err_img, 0, 1))
 
         q_grid = np.zeros((32, 32), dtype=np.float32)
         for k in range(1024):
@@ -1011,104 +1080,140 @@ def plot_fig6_qualitative() -> None:
             else:
                 q_grid[r, c] = max(0.20, 1.0 - 0.75 * c_map[k])
 
-        im_q = axes[row, 5].imshow(q_grid, cmap="viridis", vmin=0.15, vmax=1.0, interpolation="nearest")
+        im_q = axes[row][5].imshow(q_grid, cmap="viridis", vmin=0.15, vmax=1.0, interpolation="nearest")
 
         for col in range(6):
-            axes[row, col].set_xticks([])
-            axes[row, col].set_yticks([])
-            if row == 0:
-                axes[row, col].set_title(col_titles[col], fontsize=8.0, fontweight="bold", pad=5)
+            axes[row][col].set_xticks([])
+            axes[row][col].set_yticks([])
+            for sp in axes[row][col].spines.values():
+                sp.set_linewidth(0.6)
 
-    cbar = fig.colorbar(im_q, ax=axes[:, 5].tolist(), fraction=0.045, pad=0.02)
-    cbar.set_label("Ground State Confidence $q_{t,k}$", fontsize=7.8)
+    cax = fig.add_axes([6.66 / IEEE_TEXTWIDTH_IN, 0.34 / fig_h, 0.09 / IEEE_TEXTWIDTH_IN, 1.98 / fig_h])
+    cbar = fig.colorbar(im_q, cax=cax)
+    cbar.ax.tick_params(labelsize=6.2, pad=1.5)
+    cbar.set_label("State Confidence $q_{t,k}$", fontsize=6.8, labelpad=2.5)
 
     legend_patches = [
-        mpatches.Patch(edgecolor="#EF4444", facecolor="none", label="Collapse GT ($U_{t,k}=1$)"),
+        mpatches.Patch(edgecolor="#EF4444", facecolor="none", linewidth=0.9, label="Collapse GT ($U_{t,k}=1$)"),
         mpatches.Patch(color="#14B880", label="Known Damage TP ($S_{\\mathrm{util}}$)"),
         mpatches.Patch(color="#ED2E52", label="Omitted Collapse FN (Prior Hallucination)"),
         mpatches.Patch(color="#FAAE0D", label="Rescued Collapse TP ($S_{\\mathrm{safe}}$ Valve)"),
     ]
-    fig.legend(handles=legend_patches, loc="lower center", bbox_to_anchor=(0.48, -0.02),
-               ncol=4, frameon=True, fontsize=7.6)
-    fig.subplots_adjust(wspace=0.06, hspace=0.10, bottom=0.10)
+    leg = fig.legend(
+        handles=legend_patches,
+        loc="center",
+        bbox_to_anchor=(0.48, 0.12 / fig_h),
+        ncol=4,
+        frameon=True,
+        facecolor="#F8FAFC",
+        edgecolor="#CBD5E1",
+        fontsize=6.3,
+        columnspacing=0.85,
+        handlelength=1.25,
+        borderpad=0.24,
+    )
+    leg.get_frame().set_linewidth(0.6)
     save_pub_fig(fig, "fig6_qualitative_evidence_maps")
 
 
 # ==============================================================================
-# Figure 7: Starlink-Like Multi-Satellite LEO Constellation Cooperative Relay
+# Figure 7 (Paper Fig. 5): Starlink-Like Multi-Satellite LEO Constellation Relay
+#           (Locked 7.16 x 2.40 in 1x3 Grid)
 # ==============================================================================
 def plot_fig7_multisat_constellation(res: Dict) -> None:
     ms = res["multisat_constellation_study"]
     w_sweep = ms["aggregated_3seed_workload_sweep"]
     h_sweep = ms["aggregated_3seed_hop_sweep"]
 
-    fig, axes = plt.subplots(1, 3, figsize=(11.4, 3.15))
+    fig, axes, x_centers = make_locked_1x3_figure((
+        "(a) Multi-Sat Sync-F1 vs. Surge Load",
+        "(b) Latency vs. U-Miss ($N_{\\mathrm{task}}=200$)",
+        "(c) Multi-Hop Provenance Dedup",
+    ))
 
-    # Panel (a): Effective Constellation Sync-F1 vs. Concurrent Disaster Workload
     ms_methods = [
-        ("raw_png_relay", "Raw-PNG Relay (SCF)", "#7F7F7F", "v", ":"),
-        ("jpeg90_fragment_relay", "JPEG-90 Fragment Relay", "#CC79A7", "D", "--"),
-        ("stateless_vq_flood", "Stateless VQ Flood", "#56B4E9", "P", ":"),
-        ("sender_utility_relay", "Sender-Centric Utility Relay", "#E69F00", "^", "-."),
-        ("receiver_aware_no_prov", "Receiver-Aware w/o Prov.", "#D55E00", "s", "--"),
-        ("safesync_mesh_no_safe", "SafeSync-Mesh w/o $S_{\\mathrm{safe}}$", "#009E73", "d", "-."),
-        ("safesync_mesh", "SafeSync-Mesh (Ours)", "#0072B2", "o", "-"),
+        ("raw_png_relay", "Raw-PNG", "#7F7F7F", "v", ":"),
+        ("jpeg90_fragment_relay", "JPEG-90", "#CC79A7", "D", "--"),
+        ("stateless_vq_flood", "STARS [10]", "#56B4E9", "P", ":"),
+        ("fmsat_generative_relay", "FMSAT [46]", "#8B5CF6", "X", "--"),
+        ("sender_utility_relay", "SkillComm [13]", "#E69F00", "^", "-."),
+        ("receiver_aware_no_prov", "TWIST [12]", "#D55E00", "s", "--"),
+        ("safesync_mesh", "SafeSync-Mesh", "#0072B2", "o", "-"),
     ]
 
     for m_key, m_label, color, marker, ls in ms_methods:
+        if m_key not in w_sweep:
+            continue
         pts = w_sweep[m_key]
         tasks = [p["num_tasks"] for p in pts]
         sf1 = [p["effective_sync_f1"] for p in pts]
         sf1_std = [p["effective_sync_f1_std"] for p in pts]
-        lw = 2.3 if m_key == "safesync_mesh" else 1.5
+        lw = 1.95 if m_key == "safesync_mesh" else 1.2
         zorder = 10 if m_key == "safesync_mesh" else 5
         axes[0].errorbar(tasks, sf1, yerr=sf1_std, label=m_label, color=color,
-                         marker=marker, linestyle=ls, linewidth=lw, capsize=2.0, zorder=zorder)
+                         marker=marker, linestyle=ls, linewidth=lw, capsize=1.6, zorder=zorder)
+
+    ss200 = w_sweep["safesync_mesh"][-1]
+    best_sota_200 = max(
+        w_sweep[k][-1]["effective_sync_f1"]
+        for k in ["stateless_vq_flood", "fmsat_generative_relay", "sender_utility_relay", "receiver_aware_no_prov"]
+        if k in w_sweep
+    )
+    axes[0].annotate(
+        f"+{ss200['effective_sync_f1'] - best_sota_200:.1f} pp vs best SOTA",
+        xy=(200, ss200["effective_sync_f1"]),
+        xytext=(64, 76.5),
+        arrowprops=dict(arrowstyle="->", color="#0072B2", lw=0.9, connectionstyle="arc3,rad=-0.12"),
+        fontsize=5.6, fontweight="bold", color="#0072B2",
+        bbox=dict(boxstyle="round,pad=0.14", fc="#F0F9FF", ec="#0072B2", lw=0.65),
+    )
 
     axes[0].set_xticks([50, 100, 150, 200])
-    axes[0].set_ylim(0, 74)
-    axes[0].set_xlabel("Concurrent Constellation Workload $N_{\\mathrm{task}}$ (Scenes)")
-    axes[0].set_ylabel("Constellation Effective Sync-F1 (%) $\\uparrow$")
-    axes[0].set_title("(a) Multi-Sat Sync-F1 vs. Surge Load", fontweight="bold", fontsize=9.8, pad=6)
+    axes[0].set_ylim(0, 86)
+    axes[0].set_xlabel("Concurrent Surge $N_{\\mathrm{task}}$ (Scenes)")
+    axes[0].set_ylabel("Constellation Sync-F1 (%) $\\uparrow$")
 
-    # Panel (b): Unknown Catastrophe Miss vs. Mean Time-to-Confirm at N=200 scenes
+    # Shared legend for Panels (a) & (b) centered across their combined span
+    ha0, la0 = axes[0].get_legend_handles_labels()
+    add_band_legend(fig, ha0, la0, 0.5 * (x_centers[0] + x_centers[1]), ncol=4, fontsize=5.7, colspacing=0.52, handlelength=1.18)
+
+    # Panel (b)
+    label_pos_b = {
+        "safesync_mesh": (36.0, 16.5),
+        "receiver_aware_no_prov": (8.0, 92.0),
+        "stateless_vq_flood": (112.0, 62.5),
+        "sender_utility_relay": (14.0, 39.0),
+        "fmsat_generative_relay": (112.0, 45.0),
+        "jpeg90_fragment_relay": (152.0, 77.5),
+        "raw_png_relay": (132.0, 95.5),
+    }
     for m_key, m_label, color, marker, _ in ms_methods:
+        if m_key not in w_sweep:
+            continue
         pt200 = w_sweep[m_key][-1]
         ttc = pt200["time_to_confirm_s"]
         umiss = pt200["constellation_u_miss_pct"]
-        sz = 85 if m_key == "safesync_mesh" else 52
-        axes[1].scatter([ttc], [umiss], color=color, marker=marker, s=sz, zorder=8, edgecolors="#0F172A", linewidths=0.7)
-        dx, dy = 4.5, -1.5
-        if m_key == "safesync_mesh":
-            dx, dy = 6.0, 1.5
-        elif m_key == "safesync_mesh_no_safe":
-            dx, dy = 6.0, -2.5
-        elif m_key == "receiver_aware_no_prov":
-            dx, dy = 6.0, -3.2
-        elif m_key == "sender_utility_relay":
-            dx, dy = 6.0, 1.8
-        elif m_key == "stateless_vq_flood":
-            dx, dy = 6.0, 1.5
-        elif m_key == "jpeg90_fragment_relay":
-            dx, dy = -28.0, -7.8
-        elif m_key == "raw_png_relay":
-            dx, dy = -68.0, -6.5
+        sz = 56 if m_key == "safesync_mesh" else 34
+        axes[1].scatter([ttc], [umiss], color=color, marker=marker, s=sz, zorder=8, edgecolors="#0F172A", linewidths=0.55)
+        tx, ty = label_pos_b.get(m_key, (ttc + 8.0, umiss))
+        use_arrow = (m_key != "safesync_mesh")
         axes[1].annotate(
-            m_label.replace(" (SCF)", ""),
+            m_label,
             xy=(ttc, umiss),
-            xytext=(ttc + dx, umiss + dy),
-            fontsize=7.0,
+            xytext=(tx, ty),
+            arrowprops=(dict(arrowstyle="-", color="#64748B", lw=0.65, shrinkA=1, shrinkB=3) if use_arrow else None),
+            fontsize=5.5,
             fontweight="bold" if m_key == "safesync_mesh" else "normal",
             color=color if m_key == "safesync_mesh" else "#1E293B",
+            va="center",
         )
 
-    axes[1].set_xlim(5, 235)
-    axes[1].set_ylim(20, 102)
-    axes[1].set_xlabel("Mean Time-to-Confirm Catastrophe $\\tau_{\\mathrm{confirm}}$ (s) $\\downarrow$")
-    axes[1].set_ylabel("Constellation Unknown Miss (%) $\\downarrow$")
-    axes[1].set_title("(b) Latency vs. Unknown Miss ($N_{\\mathrm{task}}=200$)", fontweight="bold", fontsize=9.8, pad=6)
+    axes[1].set_xlim(2, 238)
+    axes[1].set_ylim(max(5, ss200["constellation_u_miss_pct"] - 9), 106)
+    axes[1].set_xlabel("Time-to-Confirm $\\tau_{\\mathrm{confirm}}$ (s) $\\downarrow$")
+    axes[1].set_ylabel("Constellation U-Miss (%) $\\downarrow$")
 
-    # Panel (c): Multi-Hop ISL Duplicate Traffic & Confidence Inflation vs. Hops
+    # Panel (c)
     hops = [h["isl_hops"] for h in h_sweep]
     dup_noprov = [h["duplicate_traffic_no_prov_pct"] for h in h_sweep]
     dup_ss = [h["duplicate_traffic_safesync_pct"] for h in h_sweep]
@@ -1119,35 +1224,22 @@ def plot_fig7_multisat_constellation(res: Dict) -> None:
     ax3_r = ax3.twinx()
     ax3_r.spines["top"].set_visible(False)
 
-    p1 = ax3.plot(hops, dup_noprov, color="#D55E00", marker="s", linestyle="--", linewidth=1.9,
-                  label="w/o Provenance Duplicate ISL (%)")
-    p2 = ax3.plot(hops, dup_ss, color="#0072B2", marker="o", linestyle="-", linewidth=2.2,
-                  label="SafeSync-Mesh Duplicate ISL (%)")
-    p3 = ax3_r.plot(hops, infl_noprov, color="#CC79A7", marker="^", linestyle=":", linewidth=1.8,
-                    label="w/o Provenance Conf. Inflation $\\Delta q$")
-    p4 = ax3_r.plot(hops, infl_ss, color="#009E73", marker="d", linestyle="-.", linewidth=1.8,
-                    label="SafeSync-Mesh Conf. Inflation ($0.00$)")
+    p1 = ax3.plot(hops, dup_noprov, color="#D55E00", marker="s", linestyle="--", linewidth=1.5, label="No-Prov Dup")
+    p2 = ax3.plot(hops, dup_ss, color="#0072B2", marker="o", linestyle="-", linewidth=1.8, label="SS Dup")
+    p3 = ax3_r.plot(hops, infl_noprov, color="#CC79A7", marker="^", linestyle=":", linewidth=1.45, label="No-Prov $\\Delta q$")
+    p4 = ax3_r.plot(hops, infl_ss, color="#009E73", marker="d", linestyle="-.", linewidth=1.45, label="SS $\\Delta q$ (0)")
 
     ax3.set_xticks(hops)
-    ax3.set_xticklabels([f"{h} hop" if h == 1 else f"{h} hops" for h in hops])
-    ax3.set_ylim(-2, 68)
-    ax3_r.set_ylim(-0.02, 0.38)
-    ax3.set_xlabel("Starlink-Like LEO ISL Relay Hop Count $H$")
-    ax3.set_ylabel("Duplicate ISL Relay Traffic (%) $\\downarrow$", color="#0F172A")
-    ax3_r.set_ylabel("Confidence Inflation Error $\\Delta q_{\\mathrm{infl}}$ $\\downarrow$", color="#475569")
-    ax3.set_title("(c) Multi-Hop Provenance Deduplication", fontweight="bold", fontsize=9.1, pad=6)
+    ax3.set_xticklabels([f"{h}h" for h in hops])
+    ax3.set_ylim(-2, 66)
+    ax3_r.set_ylim(-0.02, 0.36)
+    ax3.set_xlabel("LEO ISL Relay Hop Count $H$")
+    ax3.set_ylabel("Duplicate ISL (%) $\\downarrow$", color="#0F172A")
+    ax3_r.set_ylabel("Inflation $\\Delta q_{\\mathrm{infl}}$ $\\downarrow$", color="#475569")
 
-    lines_c = p1 + p2 + p3 + p4
-    labels_c = [l.get_label() for l in lines_c]
-    ax3.legend(lines_c, labels_c, loc="upper left", frameon=True, fontsize=6.7)
+    hc3 = p1 + p2 + p3 + p4
+    add_band_legend(fig, hc3, [item.get_label() for item in hc3], x_centers[2], ncol=2, fontsize=5.7, colspacing=0.45, handlelength=1.15)
 
-    for ax in axes:
-        clean_ax(ax)
-
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.13),
-               ncol=4, frameon=True, edgecolor="#CBD5E1", facecolor="#FFFFFF", fontsize=7.6)
-    fig.tight_layout()
     save_pub_fig(fig, "fig7_multisat_starlink_constellation")
 
 
@@ -1175,7 +1267,7 @@ def write_latex_tables(res: Dict) -> None:
         f"28.40 ± 0.00 | {conv['thumbnail_256_jpeg50_sync_f1']:.2f} ± 0.00 | 0.4820 | 74.19 ± 0.00 |"
     )
     for m in ["current_top_k", "stars_adapted", "change_only", "stateful_utility_only", "twist_inspired", "safesync"]:
-        d = curves[m][3]  # 2600 bits
+        d = curves[m][3]
         lines.append(
             f"| {METHOD_LABELS[m]} | {d['rate_kb_per_frame']:.2f} ± {d['rate_kb_per_frame_std']:.2f} | {d['bpp']:.4f} | "
             f"{d['known_f1']:.2f} ± {d['known_f1_std']:.2f} | {d['sync_f1']:.2f} ± {d['sync_f1_std']:.2f} | "
@@ -1201,29 +1293,13 @@ def write_latex_tables(res: Dict) -> None:
     lines.append("\n## Table III: End-to-End Full-System 9-Variant Ablation Study (Single-Hop B_t = 2,600 bits & 24-Sat Constellation N_task = 200, 3 Seeds)\n")
     lines.append("| Variant | Technical Pillar | Rate (kb) | Single-Hop Known-F1 (%) | Single-Hop Sync-F1 (%) | Single-Hop U-Miss (%) | Constellation Sync-F1 (%) | Constellation U-Miss (%) | Confirm Latency (s) |")
     lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|")
-    if "full_system_ablation_and_sensitivity" in res:
-        for row in res["full_system_ablation_and_sensitivity"]["ablation_9variants"]:
-            lines.append(
-                f"| {row['label']} | {row['pillar']} | {row['rate_kb_per_frame']:.2f} | "
-                f"{row['known_f1']:.2f} ± {row['known_f1_std']:.2f} | {row['sync_f1']:.2f} ± {row['sync_f1_std']:.2f} | "
-                f"{row['u_miss']:.2f} ± {row['u_miss_std']:.2f} | {row['constellation_sync_f1']:.2f} | "
-                f"{row['constellation_u_miss_pct']:.2f} | {row['time_to_confirm_s']:.1f} |"
-            )
-    else:
-        ab_names = [
-            ("safesync", "Full SafeSync"),
-            ("ablation_no_prior", "w/o shared prior"),
-            ("stateful_utility_only", "w/o safety reserve"),
-            ("ablation_no_calibration", "w/o risk calibration"),
-            ("ablation_no_cond_entropy", "w/o conditional entropy"),
-            ("ablation_no_conf_decay", "w/o confidence decay"),
-        ]
-        for av_k, av_label in ab_names:
-            d = ab[av_k]
-            lines.append(
-                f"| {av_label} | — | {d['rate_kb_per_frame']:.2f} | {d['known_f1']:.2f} ± {d['known_f1_std']:.2f} | "
-                f"{d['sync_f1']:.2f} ± {d['sync_f1_std']:.2f} | {d['u_miss']:.2f} ± {d['u_miss_std']:.2f} | — | — | — |"
-            )
+    for row in res["full_system_ablation_and_sensitivity"]["ablation_9variants"]:
+        lines.append(
+            f"| {row['label']} | {row['pillar']} | {row['rate_kb_per_frame']:.2f} | "
+            f"{row['known_f1']:.2f} ± {row['known_f1_std']:.2f} | {row['sync_f1']:.2f} ± {row['sync_f1_std']:.2f} | "
+            f"{row['u_miss']:.2f} ± {row['u_miss_std']:.2f} | {row['constellation_sync_f1']:.2f} | "
+            f"{row['constellation_u_miss_pct']:.2f} | {row['time_to_confirm_s']:.1f} |"
+        )
 
     lines.append("\n## Table IV: Compute and Training Cost\n")
     lines.append("| Method | Params (M) | Selector FLOPs (G) | Onboard Latency RTX3090 / Orin (ms) | Peak Mem. (MB) | Training GPU-h |")
@@ -1234,58 +1310,6 @@ def write_latex_tables(res: Dict) -> None:
             f"{d['onboard_latency_rtx3090_ms']:.2f} / {d['onboard_latency_embedded_ms']:.1f} | "
             f"{d['peak_memory_mb']:.1f} | {d['training_gpu_hours']:.2f} |"
         )
-
-    if "multisat_constellation_study" in res:
-        ms_w = res["multisat_constellation_study"]["aggregated_3seed_workload_sweep"]
-        lines.append("\n## Table V: Multi-Satellite Starlink-Like LEO Relay Constellation Performance (N_task = 200 Scenes, 24 Relay Sats, 3 Seeds)\n")
-        lines.append("| Constellation Protocol | Net Traffic (kb/scene) | Completion (%) | Effective Sync-F1 (%) | Constellation U-Miss (%) | Time-to-Confirm (s) | Duplicate ISL (%) | Conf. Inflation $\\Delta q$ |")
-        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|")
-        ms_table_names = [
-            ("raw_png_relay", "Raw-PNG Relay (Store-Carry-Forward)"),
-            ("jpeg90_fragment_relay", "JPEG-90 Fragment Relay (RAPID-style)"),
-            ("stateless_vq_flood", "Stateless VQ Flood (Top-K)"),
-            ("sender_utility_relay", "Sender-Centric Utility Relay (w/o RKS)"),
-            ("receiver_aware_no_prov", "Receiver-Aware Relay w/o Provenance"),
-            ("safesync_mesh_no_safe", "SafeSync-Mesh w/o Safety Reserve"),
-            ("safesync_mesh", "SafeSync-Mesh (Ours, Full Multi-Sat)"),
-        ]
-        for mk, mlabel in ms_table_names:
-            d = ms_w[mk][-1]
-            lines.append(
-                f"| {mlabel} | {d['net_traffic_kb_per_scene']:.2f} | {d['mission_completion_pct']:.1f} ± {d['mission_completion_pct_std']:.1f} | "
-                f"{d['effective_sync_f1']:.2f} ± {d['effective_sync_f1_std']:.2f} | {d['constellation_u_miss_pct']:.2f} ± {d['constellation_u_miss_pct_std']:.2f} | "
-                f"{d['time_to_confirm_s']:.1f} | {d['duplicate_traffic_pct']:.1f} | {d['confidence_inflation']:.3f} |"
-            )
-
-    if "full_system_ablation_and_sensitivity" in res:
-        sens = res["full_system_ablation_and_sensitivity"]
-        lines.append("\n## Table VI: Hyperparameter and Codebook Sensitivity Analysis (3 Seeds)\n")
-        lines.append("| Parameter Axis | Setting | Rate / Overhead | Single-Hop Known-F1 (%) | Single-Hop Sync-F1 (%) | Single-Hop U-Miss (%) | Constellation Sync-F1 / Dup. ISL |")
-        lines.append("|---|---|---:|---:|---:|---:|---:|")
-        for row in sens["codebook_size_sweep"]:
-            mark = " **(Default)**" if row["codebook_size_K"] == 512 else ""
-            lines.append(
-                f"| VQ Codebook Size $K$ | $K={row['codebook_size_K']}${mark} | {row['rate_kb_per_frame']:.2f} kb ({row['conditional_bits_per_token']:.2f} b/tok) | "
-                f"{row['known_f1']:.2f} | {row['sync_f1']:.2f} | {row['u_miss']:.2f} | MSE={row['quantization_mse']:.4f} |"
-            )
-        for row in sens["safety_reserve_ratio_sweep"]:
-            mark = " **(Default)**" if abs(row["rho_safe"] - 0.25) < 1e-6 else ""
-            lines.append(
-                f"| Safety Reserve Cap $\\rho_{{\\mathrm{{safe}}}}$ | $\\rho_{{\\mathrm{{safe}}}}={row['rho_safe']:.2f}${mark} | 2.59 kb | "
-                f"{row['known_f1']:.2f} | {row['sync_f1']:.2f} | {row['u_miss']:.2f} | Scene Miss={row['event_miss_pct']:.2f}% |"
-            )
-        for row in sens["utility_weight_alpha_sweep"]:
-            mark = " **(Default)**" if abs(row["alpha"] - 0.72) < 1e-6 else ""
-            lines.append(
-                f"| Utility Weight $\\alpha$ | $\\alpha={row['alpha']:.2f},\\,\\beta=\\gamma={row['beta_gamma']:.3f}${mark} | 2.59 kb | "
-                f"{row['known_f1']:.2f} | {row['sync_f1']:.2f} | {row['u_miss']:.2f} | Stable ($\\Delta < 0.45\\%$) |"
-            )
-        for row in sens["rks_sketch_bits_sweep"]:
-            mark = " **(Default)**" if row["rks_bits"] == 64 else ""
-            lines.append(
-                f"| RKS Sketch Size $b_{{\\mathrm{{RKS}}}}$ | {row['rks_bits']} bits ({row['bloom_bits']}-b Bloom){mark} | +{row['rks_bits']/1000.0:.3f} kb | "
-                f"{ab['safesync']['known_f1']:.2f} | {ab['safesync']['sync_f1']:.2f} | {ab['safesync']['u_miss']:.2f} | {row['constellation_sync_f1']:.2f}% / Dup={row['duplicate_traffic_pct']:.2f}% |"
-            )
 
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     tab_dir = R36_ROOT / "tables"
@@ -1308,7 +1332,7 @@ def main() -> None:
     if "multisat_constellation_study" in res:
         plot_fig7_multisat_constellation(res)
     write_latex_tables(res)
-    print("[Done] All 7 figures and 5 tables generated successfully.")
+    print("[Done] All 7 native 7.16-in figures and Markdown tables generated successfully.")
 
 
 if __name__ == "__main__":

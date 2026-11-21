@@ -25,7 +25,7 @@ HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE / "scripts"))
 
 from safesync.safesync_wire import ConditionalTokenEntropyCodec  # noqa: E402
-from run_safesync_experiments import (  # noqa: E402
+from safesync.run_safesync_experiments import (  # noqa: E402
     CalibratedOpenWorldRiskEstimator,
     ClosedSetKnownHead,
     MarginalUtilityScorer,
@@ -109,7 +109,11 @@ def run_single_fold(
 
     trans_counts = np.zeros((512, 512), dtype=np.int64)
     np.add.at(trans_counts, (pri_idx_all[idx_train].ravel(), curr_idx_all[idx_train].ravel()), 1)
-    codec = ConditionalTokenEntropyCodec(codebook, trans_counts)
+    ci_tr_2d = curr_idx_all[idx_train].reshape(-1, 32, 32)
+    spatial_counts = np.zeros((512, 512), dtype=np.int64)
+    np.add.at(spatial_counts, (ci_tr_2d[:, :, :-1].ravel(), ci_tr_2d[:, :, 1:].ravel()), 1)
+    np.add.at(spatial_counts, (ci_tr_2d[:, :-1, :].ravel(), ci_tr_2d[:, 1:, :].ravel()), 1)
+    codec = ConditionalTokenEntropyCodec(codebook, trans_counts, spatial_counts)
 
     c_k_all = compute_innovation_c_k(f_curr_all, f_pri_all)
     dist_to_pri_proto = np.linalg.norm(f_curr_all - q_pri_all, axis=-1)
@@ -117,42 +121,49 @@ def run_single_fold(
     curr_idx_all[deadzone_mask] = pri_idx_all[deadzone_mask]
     q_curr_all[deadzone_mask] = q_pri_all[deadzone_mask]
 
-    # 2. Train Stage-2 Bottleneck Decoder Head T_psi on Train + Val (disjoint from Test-Fold)
+    # 2. Train 2D Spatial Stage-2 Bottleneck Decoder Head T_psi strictly on wire-quantized q_curr_all + f_pri_all on Train + Val
     decoder_head = Stage2BottleneckHead(d=256, hidden=192, n_classes=5).to(device)
-    opt_dec = torch.optim.AdamW(decoder_head.parameters(), lr=2.8e-3, weight_decay=1e-4)
+    opt_dec = torch.optim.AdamW(decoder_head.parameters(), lr=2.5e-3, weight_decay=1e-4)
 
     idx_tv = np.concatenate([idx_train, idx_val])
+    S_qc_tv = torch.from_numpy(q_curr_all[idx_tv]).to(device)
+    S_fp_tv = torch.from_numpy(f_pri_all[idx_tv]).to(device)
+    S_lp_tv = torch.from_numpy(loc_p_all[idx_tv]).to(device)
+    S_ck_tv = torch.from_numpy(c_k_all[idx_tv]).to(device)
+    Y_t_tv = torch.from_numpy(logits_curr_all[idx_tv]).to(device)
+    Y_pt_tv = torch.from_numpy(logits_pri_all[idx_tv]).to(device)
+
     X_f_curr_tv = torch.from_numpy(f_curr_all[idx_tv].reshape(-1, 256)).to(device)
-    X_q_curr_tv = torch.from_numpy(q_curr_all[idx_tv].reshape(-1, 256)).to(device)
     X_f_pri_tv = torch.from_numpy(f_pri_all[idx_tv].reshape(-1, 256)).to(device)
-    X_loc_p_tv = torch.from_numpy(loc_p_all[idx_tv].reshape(-1)).to(device)
-    X_c_k_tv = torch.from_numpy(c_k_all[idx_tv].reshape(-1)).to(device)
     Y_teacher_tv = torch.from_numpy(logits_curr_all[idx_tv].reshape(-1, 5)).to(device)
     Y_pri_teacher_tv = torch.from_numpy(logits_pri_all[idx_tv].reshape(-1, 5)).to(device)
 
-    fg_tv = cell_gt_all[idx_tv, :, 1:5].reshape(-1, 4)
-    has_bldg_tv = fg_tv.sum(axis=-1) >= 16
-    dom_class_tv = np.where(has_bldg_tv, np.argmax(fg_tv, axis=-1) + 1, 0)
-    Y_dom_tv = torch.from_numpy(dom_class_tv).long().to(device)
-    Y_pri_dom_tv = torch.where(
-        torch.from_numpy(has_bldg_tv).to(device), torch.ones_like(Y_dom_tv), torch.zeros_like(Y_dom_tv)
-    )
+    fg_tv_3d = cell_gt_all[idx_tv, :, 1:5]
+    hb_tv_3d = fg_tv_3d.sum(axis=-1) >= 16
+    Y_d_tv = torch.from_numpy(np.where(hb_tv_3d, np.argmax(fg_tv_3d, axis=-1) + 1, 0)).long().to(device)
+    Y_pd_tv = torch.where(torch.from_numpy(hb_tv_3d).to(device), torch.ones_like(Y_d_tv), torch.zeros_like(Y_d_tv))
+    proxy_rk_tv = torch.from_numpy(
+        np.clip((((cell_gt_all[idx_tv, :, 3] + cell_gt_all[idx_tv, :, 4]) >= 40) & (loc_p_all[idx_tv] > 0.20)).astype(np.float32) * 0.85, 0.0, 1.0)
+    ).to(device)
 
     batch_sz = 4096
     n_tv_tok = X_f_curr_tv.shape[0]
-    class_weights = torch.tensor([0.25, 1.0, 2.3, 2.8, 3.2], device=device)
-    for _ in range(25):
-        perm = torch.randperm(n_tv_tok, device=device)
-        for i in range(0, n_tv_tok, batch_sz):
-            b = perm[i : i + batch_sz]
-            keep_mask = (torch.rand(len(b), device=device) < 0.72).float()
-            f_blend = 0.35 * X_q_curr_tv[b] + 0.65 * X_f_curr_tv[b]
-            f_in = keep_mask[:, None] * f_blend + (1.0 - keep_mask[:, None]) * X_f_pri_tv[b]
-            conf_in = keep_mask + (1.0 - keep_mask) * torch.clamp(1.0 - 0.75 * X_c_k_tv[b], 0.20, 0.95)
-            out_logits = decoder_head(f_in, X_f_pri_tv[b], X_loc_p_tv[b], conf_in)
-            y_target = torch.where(keep_mask > 0.5, Y_dom_tv[b], Y_pri_dom_tv[b])
-            y_kd = keep_mask[:, None] * Y_teacher_tv[b] + (1.0 - keep_mask[:, None]) * Y_pri_teacher_tv[b]
-            loss = F.cross_entropy(out_logits, y_target, weight=class_weights) + 0.45 * F.mse_loss(out_logits, y_kd)
+    class_weights = torch.tensor([0.25, 1.0, 2.5, 3.0, 3.5], device=device)
+    for _ in range(40):
+        perm_s = torch.randperm(len(idx_tv), device=device)
+        for i in range(0, len(idx_tv), 24):
+            b = perm_s[i : i + 24]
+            keep_rate = torch.empty((len(b), 1), device=device).uniform_(0.10, 0.96)
+            keep = (torch.rand((len(b), 1024), device=device) < keep_rate).float()
+            use_cd = (torch.rand((len(b), 1), device=device) < 0.75).float()
+            f_in = keep.unsqueeze(-1) * S_qc_tv[b] + (1.0 - keep.unsqueeze(-1)) * S_fp_tv[b]
+            conf_cd = keep + (1.0 - keep) * torch.clamp(1.0 - 0.75 * S_ck_tv[b], 0.20, 0.95)
+            conf_in = use_cd * conf_cd + (1.0 - use_cd) * torch.ones_like(conf_cd)
+            rm_in = use_cd * keep * proxy_rk_tv[b]
+            out_logits = decoder_head(f_in, S_fp_tv[b], S_lp_tv[b], conf_in, rm_in)
+            y_target = torch.where(keep > 0.5, Y_d_tv[b], Y_pd_tv[b])
+            y_kd = keep.unsqueeze(-1) * Y_t_tv[b] + (1.0 - keep.unsqueeze(-1)) * Y_pt_tv[b]
+            loss = F.cross_entropy(out_logits.reshape(-1, 5), y_target.reshape(-1), weight=class_weights) + 0.45 * F.mse_loss(out_logits, y_kd)
             opt_dec.zero_grad()
             loss.backward()
             opt_dec.step()
@@ -184,14 +195,17 @@ def run_single_fold(
     known_head.eval()
 
     with torch.inference_mode():
-        kh_probs_curr = known_head(X_f_curr, X_loc_p).softmax(dim=-1)
-        is_known_fg = ((Y_dom == 1) | (Y_dom == 2)).float()
+        logits_kh_curr = known_head(X_f_curr, X_loc_p)
+        logits_kh_pri = known_head(X_f_pri, X_loc_p)
+        loss_curr_tok = F.cross_entropy(logits_kh_curr, Y_kh_all, weight=kh_weights, reduction="none")
+        loss_pri_tok = F.cross_entropy(logits_kh_pri, Y_kh_all, weight=kh_weights, reduction="none")
+        delta_loss = torch.clamp(loss_pri_tok - loss_curr_tok, min=0.0)
         is_minor_dmg = (Y_dom == 2).float()
-        known_conf = kh_probs_curr[:, 1] + 1.6 * kh_probs_curr[:, 2]
+        is_known_chg = ((Y_dom == 2) | ((Y_dom == 1) & (X_c_k > 0.22))).float()
         target_g_k = torch.clamp(
-            is_known_fg * (0.45 * known_conf + 1.35 * is_minor_dmg + 0.55 * X_c_k * X_loc_p),
+            delta_loss + 1.25 * is_minor_dmg + 0.45 * is_known_chg * X_c_k,
             0.0,
-            3.0,
+            4.0,
         )
 
     utility_scorer = MarginalUtilityScorer(d=256, hidden=128).to(device)
@@ -286,7 +300,7 @@ def run_single_fold(
         + 0.35 * (p_curr_sm[:, :, 1] + 1.35 * p_curr_sm[:, :, 2])
     ).astype(np.float32)
     closed_set_conf = np.clip(all_known_probs[:, :, 1] + all_known_probs[:, :, 2], 0.0, 1.0)
-    all_twist_score = (0.72 * all_g_k + 0.28 * (closed_set_conf ** 1.5) * c_k_all).astype(np.float32)
+    all_twist_score = (0.65 * (closed_set_conf ** 1.5) * c_k_all + 0.35 * all_known_saliency * c_k_all).astype(np.float32)
 
     test_events = np.array([scenes_meta[i]["event"] for i in idx_test])
     is_heldout_event = np.isin(
@@ -310,10 +324,9 @@ def run_single_fold(
     ece_cal, _ = compute_ece(test_cal_prob[bldg_cand_test], test_unknown_gt[bldg_cand_test])
 
     with torch.inference_mode():
-        f_blend_test = 0.35 * q_curr_all[idx_test] + 0.65 * f_curr_all[idx_test]
         t_logits = (
             decoder_head(
-                torch.from_numpy(f_blend_test).to(device),
+                torch.from_numpy(q_curr_all[idx_test]).to(device),
                 torch.from_numpy(f_pri_all[idx_test]).to(device),
                 torch.from_numpy(loc_p_all[idx_test]).to(device),
                 torch.ones((len(idx_test), 1024), device=device),

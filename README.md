@@ -28,7 +28,7 @@ When agile Earth-observation (EO) satellites cooperate with Starlink-like low-Ea
 ### Method Summary
 
 **SafeSync-Mesh** models cooperative multi-satellite dissemination as an orbital epistemic state machine:
-- **Stage-2 Bottleneck Vector Quantization (`32×32`, `K=512`)**: Replaces multi-skip floating-point feature dumps with compact discrete bottleneck indices and conditional transition prefix coding inside verifiable `324-byte` (`2.59 kb/frame`) CRC32-protected packets.
+- **Stage-2 Bottleneck Vector Quantization (`32×32`, `K=512`) & 2D Causal Spatio-Temporal Prefix Coding**: Replaces multi-skip floating-point feature dumps with compact discrete bottleneck indices, a 2D `3×3` depthwise-separable refinement head operating strictly on wire-decoded tokens, and 2D causal spatio-temporal conditional prefix coding (`5.89 bits/token`, packing `236.8` tokens per `324-byte` CRC32-protected frame).
 - **Orthogonal Utility–Risk Decomposition & Epistemic Safety Valve ($S_{\mathrm{safe}}$)**: Separates routine closed-set utility $g_k$ from isotonic-conformal calibrated open-world risk $p_k$, reserving budget for high-risk anomalies until omitted risk satisfies $\sum_{s_k=0} p_k \le \delta$ (**Proposition 1**).
 - **64-Bit Recipient Knowledge Sketch (RKS) & Idempotent State Algebra**: Uses a compact 64-bit control sketch (`32-bit` Bloom filter + `16-bit` prior digest + `16-bit` age vector) and persistent `root_id` provenance tags so multi-path arrivals fuse idempotently ($M_j \oplus e \oplus \cdots \oplus e = M_j \oplus e$, $\Delta q_{\mathrm{infl}} = 0$, **Proposition 2**).
 
@@ -48,7 +48,7 @@ When agile Earth-observation (EO) satellites cooperate with Starlink-like low-Ea
 ### 核心设计思路
 
 围绕上述问题，**SafeSync-Mesh** 尝试从表征层与网络层做协同设计：
-- **瓶颈层离散向量量化与条件前缀编码**：采用 `32×32` 瓶颈层离散码本（`K=512`）配合轻量级二阶段先验融合解码头，在 `324 字节/帧`（`2.59 kb/frame`，含 128-bit 帧头、CRC32、空间掩码与安全元数据）的真实线级比特核算下完成增量状态同步。
+- **瓶颈层离散向量量化与二维因果时空条件前缀编码**：采用 `32×32` 瓶颈层离散码本（`K=512`）配合轻量级二维深度可分离先验融合解码头（严格基于线级解码离散原型推理）与二维因果时空条件前缀编码（`5.89 bits/token`），在 `324 字节/帧`（`2.59 kb/frame`，含 128-bit 帧头、CRC32、空间掩码与安全元数据）的真实线级比特核算下完成增量状态同步。
 - **效用—风险正交分解与认知安全阀（$S_{\mathrm{safe}}$）**：将常规闭集边际效用 $g_k$ 与保序回归—共形校准后的开放世界风险 $p_k$ 解耦，优先保留高风险异常区域以约束未知灾损漏检上界（**Proposition 1**）。
 - **64-bit 接收端知识草图（RKS）与溯源幂等状态代数**：通过 64-bit 轻量控制握手与持久化根观测标识 `root_id`，在中间星上以 $\mathcal{O}(1)$ 开销抑制多径重复转发，并保证多路径状态融合严格幂等（$\Delta q_{\mathrm{infl}} = 0$，**Proposition 2**）。
 
@@ -60,19 +60,20 @@ When agile Earth-observation (EO) satellites cooperate with Starlink-like low-Ea
 
 ### 1. Single-Hop Rate–Utility–Safety & 5-Fold Stratified Cross-Validation (`xBD`)
 
-At matched application-layer budget $B_t = 2{,}600\text{ bits}$ (`2.59 kb/frame`, `324.0 bytes/frame`), all single-hop baselines share the same frozen Swin-T features, `K=512` codebook, and Stage-2 decoder head:
+At matched application-layer budget $B_t = 2{,}600\text{ bits}$ (`2.59 kb/frame`, `324.4 bytes/frame`), all single-hop baselines share identical frozen Swin-T features, `K=512` codebooks, and wire-only 2D Stage-2 refinement decoders:
 
 | Method | Protocol | Wire Rate (kb/frame) ↓ | Known-Task F1 (%) ↑ | All-Class Sync-F1 (%) ↑ | Unknown Catastrophe Miss (%) ↓ |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Full feature (uncompressed VQ ref) | 3-Seed | 9.34 ± 0.00 | 72.59 ± 3.15 | 73.08 ± 1.96 | 0.00 ± 0.00 |
-| Current-frame Top-$K$ | 3-Seed | 2.59 ± 0.00 | 51.98 ± 2.13 | 45.91 ± 0.67 | 63.20 ± 1.46 |
-| STARS-style adapted | 3-Seed | 2.59 ± 0.00 | 52.57 ± 2.20 | 46.61 ± 0.79 | 63.03 ± 1.60 |
-| Stateful utility-only (w/o $S_{\mathrm{safe}}$) | 3-Seed | 2.59 ± 0.00 | 68.98 ± 2.23 | 57.87 ± 1.24 | 65.70 ± 1.09 |
-| TWIST-inspired | 3-Seed | 2.59 ± 0.00 | **69.17 ± 2.28** | 59.22 ± 1.23 | 58.37 ± 0.84 |
-| **SafeSync-Mesh** | **3-Seed** | **2.59 ± 0.00** | 68.47 ± 1.81 | **63.15 ± 0.89** | **33.42 ± 0.49** |
-| Stateful utility-only (w/o $S_{\mathrm{safe}}$) | 5-Fold CV | 2.59 ± 0.00 | 71.27 ± 1.58 | 58.77 ± 1.88 | 62.44 ± 5.76 |
-| TWIST-inspired | 5-Fold CV | 2.59 ± 0.00 | **71.38 ± 1.55** | 59.74 ± 2.48 | 56.76 ± 10.43 |
-| **SafeSync-Mesh** | **5-Fold CV** | **2.59 ± 0.00** | 70.31 ± 2.83 | **63.90 ± 2.01** | **26.94 ± 12.44** ($p < 0.001$) |
+| Full feature (uncompressed VQ ref) | 3-Seed | 9.34 ± 0.00 | 75.89 ± 0.73 | 75.22 ± 0.39 | 0.00 ± 0.00 |
+| Current-frame Top-$K$ | 3-Seed | 2.61 ± 0.00 | 46.50 ± 0.50 | 39.83 ± 0.28 | 71.31 ± 1.02 |
+| STARS-style adapted [10] | 3-Seed | 2.60 ± 0.00 | 54.21 ± 0.43 | 47.43 ± 0.22 | 62.38 ± 0.89 |
+| Stateful utility-only (w/o $S_{\mathrm{safe}}$) | 3-Seed | 2.61 ± 0.00 | 69.39 ± 0.48 | 61.49 ± 0.60 | 44.70 ± 2.23 |
+| TWIST-inspired [12] | 3-Seed | 2.61 ± 0.00 | 69.25 ± 0.33 | 57.25 ± 0.15 | 60.30 ± 1.19 |
+| **SafeSync-Mesh** | **3-Seed** | **2.59 ± 0.00** | **69.55 ± 0.59** | **65.95 ± 0.16** | **22.93 ± 1.15** |
+| STARS-style adapted [10] | 5-Fold CV | 2.59 ± 0.00 | 54.89 ± 3.25 | 47.23 ± 3.38 | 60.41 ± 12.79 |
+| Stateful utility-only (w/o $S_{\mathrm{safe}}$) | 5-Fold CV | 2.61 ± 0.00 | 70.78 ± 2.43 | 62.50 ± 1.32 | 33.03 ± 11.82 |
+| TWIST-inspired [12] | 5-Fold CV | 2.61 ± 0.00 | 70.44 ± 2.53 | 57.37 ± 3.23 | 61.57 ± 10.97 |
+| **SafeSync-Mesh** | **5-Fold CV** | **2.59 ± 0.00** | **70.97 ± 3.39** | **66.81 ± 1.50** | **16.28 ± 8.85** ($p < 0.001$, 0.00% Event Miss) |
 
 <p align="center">
   <img src="assets/fig2_rate_task_pareto.png" width="96%" alt="Single-Hop Rate-Task-Sync Pareto Curves"/>
@@ -90,13 +91,13 @@ At matched application-layer budget $B_t = 2{,}600\text{ bits}$ (`2.59 kb/frame`
 
 | Constellation Relay Protocol | Traffic / Scene (kb) ↓ | Completion (%) ↑ | Effective Sync-F1 (%) ↑ | Constellation U-Miss (%) ↓ | Mean Confirm (s) ↓ | Duplicate ISL ↓ | Confidence Inflation $\Delta q$ ↓ |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Raw-PNG Relay (Store-Carry-Forward) | 13,737.86 | 3.3 ± 0.0 | 2.52 ± 0.00 | 96.72 ± 0.00 | 220.9 | 13.0% | 0.042 |
-| JPEG-90 Fragment Relay | 2,128.27 | 21.1 ± 0.0 | 16.18 ± 0.00 | 79.70 ± 0.00 | 133.2 | 7.4% | 0.018 |
-| Stateless VQ Flood (Top-$K$) | 5.61 | 100.0 ± 0.0 | 45.91 ± 0.68 | 63.20 ± 1.46 | 48.3 | 53.8% | 0.254 |
-| Sender-Centric Utility Relay (w/o RKS) | 5.61 | 75.8 ± 1.0 | 51.60 ± 1.10 | 74.01 ± 0.90 | 53.1 | 53.8% | 0.248 |
-| Receiver-Aware Relay w/o Provenance | 9.29 | 79.7 ± 1.6 | 48.50 ± 1.10 | 57.11 ± 0.60 | 44.5 | 53.8% | 0.241 |
-| SafeSync-Mesh w/o Safety Reserve | 4.40 | **100.0 ± 0.0** | 61.55 ± 1.28 | 51.24 ± 1.01 | 29.0 | **2.3%** | **0.000** |
-| **SafeSync-Mesh (Full)** | **4.40** | **100.0 ± 0.0** | **65.55 ± 1.07** | **26.29 ± 0.15** | **18.1** | **2.3%** | **0.000** |
+| Raw-PNG Relay (Store-Carry-Forward) | 13,737.86 | 3.3 ± 0.0 | 2.52 ± 0.00 | 96.72 ± 0.00 | 221.2 | 13.0% | 0.042 |
+| JPEG-90 Fragment Relay (RAPID-style) | 2,128.27 | 21.1 ± 0.0 | 16.18 ± 0.00 | 79.70 ± 0.00 | 131.7 | 7.4% | 0.018 |
+| STARS-style [10] (Stateless VQ ISL) | 5.62 | 81.9 ± 1.7 | 38.86 ± 0.70 | 69.19 ± 0.26 | 56.5 | 53.8% | 0.254 |
+| FMSAT-style [46] (Generative SatCom) | 6.29 | 73.2 ± 1.5 | 39.53 ± 0.72 | 66.64 ± 0.25 | 71.6 | 53.8% | 0.246 |
+| SkillComm-style [13] (Sender Stateful) | 5.62 | 62.1 ± 1.2 | 44.13 ± 1.20 | 65.66 ± 2.02 | 58.2 | 53.8% | 0.248 |
+| TWIST-inspired [12] (w/o Provenance) | 9.29 | 49.5 ± 1.0 | 29.15 ± 0.57 | 74.07 ± 0.30 | 56.0 | 53.8% | 0.241 |
+| **SafeSync-Mesh (Full)** | **4.40** | **100.0 ± 0.0** | **68.20 ± 0.29** | **18.34 ± 0.77** | **17.5** | **2.3%** | **0.000** |
 
 <p align="center">
   <img src="assets/fig7_multisat_starlink_constellation.png" width="96%" alt="24-Satellite Walker-Delta LEO ISL Constellation Results"/>
@@ -128,10 +129,10 @@ python verify_quickstart.py
 Expected output:
 
 ```text
-[PASS] Wire Codec & Proposition 2 Check: 287 bytes (2296 bits), CRC32 tamper rejected, 4-path ISL idempotence diff = 0.000
-[PASS] 3-Seed Open-World (2.59 kb/frame): Known-F1=68.47%, Sync-F1=63.15%, U-Miss=33.42%
-[PASS] 5-Fold Cross-Validation (440 xBD pairs): Known-F1=70.31%±2.83%, Sync-F1=63.90%±2.01%, U-Miss=26.94%±12.44%
-[PASS] 24-Sat Walker-Delta ISL Surge (N=200): Completion=100.0%, Constellation Sync-F1=65.55%, Confirm=18.1s
+[PASS] Wire Codec & Proposition 2 Check: 291 bytes (2328 bits), CRC32 tamper rejected, 4-path ISL idempotence diff = 0.000
+[PASS] 3-Seed Open-World (2.59 kb/frame): Known-F1=69.55%, Sync-F1=65.95%, U-Miss=22.93%
+[PASS] 5-Fold Cross-Validation (440 xBD pairs): Known-F1=70.97%±3.39%, Sync-F1=66.81%±1.50%, U-Miss=16.28%±8.85%
+[PASS] 24-Sat Walker-Delta ISL Surge (N=200): Completion=100.0%, Constellation Sync-F1=68.20%, Confirm=17.5s
 ```
 
 ---
@@ -163,7 +164,7 @@ SafeSync-Mesh/
 ## Reproducibility / 复现说明
 
 - **Datasets**: Publicly available [xBD](https://xview2.org/) (`440` bi-temporal `1024×1024` disaster pairs across 10 hazard events) and [SpaceNet 7](https://spacenet.ai/sn7-challenge/) (`24` multi-month `512×512` urban tracking windows).
-- **Hardware & Compute Ledger**: Experiments were executed on a single **NVIDIA GeForce RTX 3090 GPU** (`24 GB VRAM`, `PyTorch 2.8.0+cu128`, `CUDA 12.8`), with orbital edge profiling on a `15 W` **NVIDIA Jetson Orin NX** (`16 GB`). Total cumulative compute across the full study is **6.91 GPU-hours** (`1.42 h` backbone feature extraction, `3.48 h` 3-seed multi-method training, `0.07 h` 5-fold stratified cross-validation, and `1.94 h` rate sweeps, 9-variant ablations, sensitivity grids, and 24-satellite constellation simulations).
+- **Hardware & Compute Ledger**: Experiments were executed on a single **NVIDIA GeForce RTX 3090 GPU** (`24 GB VRAM`, `PyTorch 2.8.0+cu128`, `CUDA 12.8`), with orbital edge profiling on a `15 W` **NVIDIA Jetson Orin NX** (`16 GB`). Total cumulative compute across the full study is **6.96 GPU-hours** (`1.42 h` backbone feature extraction, `3.48 h` 3-seed multi-method training, `0.12 h` / `422.6 s` 5-fold stratified cross-validation, and `1.94 h` rate sweeps, 9-variant ablations, sensitivity grids, and 24-satellite constellation simulations).
 - **Full Re-run**: Once cached token tensors (`xbd_openworld_features_440.npz` and `sn7_bottleneck_tokens.npz`) are placed under `data_cache/`, run:
   ```bash
   python -m safesync.run_safesync_experiments

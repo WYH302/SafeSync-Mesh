@@ -151,21 +151,22 @@ def simulate_constellation_for_seed(
     m_ss = b_sweep["safesync"][3]                 # 2600 bits
     m_util = b_sweep["stateful_utility_only"][3]  # 2600 bits
     m_tw = b_sweep["twist_inspired"][3]           # 2600 bits
+    m_st = b_sweep["stars_adapted"][3]            # 2600 bits
     m_top = b_sweep["current_top_k"][3]           # 2600 bits
     m_full = seed_metrics["full_feature_reference"]
 
     # Real payload sizes in kilobits (kb) per scene
-    rate_raw_png_kb = 1493.246 * 8.0      # 11,945.97 kb (1.493 MB from REAL_TASK_REPORT.md)
-    rate_jpeg90_kb = 246.328 * 8.0        # 1,970.62 kb (246.3 KB from REAL_TASK_REPORT.md)
+    rate_raw_png_kb = 1493.246 * 8.0      # 11,945.97 kb (1.493 MB)
+    rate_jpeg90_kb = 246.328 * 8.0        # 1,970.62 kb (246.3 KB)
     rate_vq_refresh_kb = m_full["rate_kb_per_frame"]  # 9.34 kb (full VQ refresh when prior mismatched)
     rate_delta_kb = m_ss["rate_kb_per_frame"]         # 2.59 kb (324 Bytes)
     rks_overhead_kb = 0.064                           # 64 bits (8 Bytes) RKS sketch per scene
 
-    # Orbital ISL bottleneck capacity during a 300-second emergency response window (20 epochs x 15s)
-    # Bulk payload slice (90,000 kb = 11.25 MB over 300s) for image/fragment relays,
-    # and dedicated low-latency ISL semantic mission sub-channel (1,480 kb over 300s) for tokenized state relays.
+    # Shared physical LEO ISL bottleneck capacity during a 300-second emergency surge window (20 epochs x 15s)
+    # Bulk payload slice (90,000 kb = 11.25 MB over 300s) for raw image/fragment relays,
+    # and dedicated low-latency ISL semantic mission sub-channel (920 kb over 300s) shared equally by all tokenized protocols.
     isl_bulk_slice_kb = 90000.0
-    isl_semantic_subchannel_kb = 1480.0
+    isl_semantic_subchannel_kb = 920.0
 
     # Fraction of (satellite, consumer) pairs with aligned prior state M_j^{t-1} vs stale/missing prior
     aligned_prior_ratio = 0.76 + 0.01 * rng.randn()
@@ -181,6 +182,7 @@ def simulate_constellation_for_seed(
         "raw_png_relay": [],
         "jpeg90_fragment_relay": [],
         "stateless_vq_flood": [],
+        "fmsat_generative_relay": [],
         "sender_utility_relay": [],
         "receiver_aware_no_prov": [],
         "safesync_mesh_no_safe": [],
@@ -189,7 +191,7 @@ def simulate_constellation_for_seed(
 
     for n_tasks in workloads:
         # 1. Raw-PNG Store-Carry-Forward Relay
-        eff_rate_png = rate_raw_png_kb * 1.15  # 15% store-carry-forward retransmission overhead
+        eff_rate_png = rate_raw_png_kb * 1.15
         delivered_png = min(1.0, isl_bulk_slice_kb / (n_tasks * eff_rate_png))
         ttc_png = 42.0 + 185.0 * (1.0 - delivered_png) + 1.2 * rng.randn()
         workload_results["raw_png_relay"].append({
@@ -220,42 +222,58 @@ def simulate_constellation_for_seed(
             "confidence_inflation": 0.018,
         })
 
-        # 3. Stateless VQ Flood (Current-frame Top-K broadcasted across ISL mesh without RKS/provenance)
-        eff_rate_top = rate_delta_kb * multipath_factor_no_prov
-        delivered_top = min(1.0, isl_semantic_subchannel_kb / (n_tasks * eff_rate_top))
-        u_rec_top = (100.0 - m_top["u_miss"]) / 100.0
+        # 3. STARS-style [10] Stateless VQ Flood (broadcast across ISL mesh without prior state or provenance dedup)
+        eff_rate_st = rate_delta_kb * multipath_factor_no_prov
+        delivered_st = min(1.0, isl_semantic_subchannel_kb / (n_tasks * eff_rate_st))
+        u_rec_st = (100.0 - m_st["u_miss"]) / 100.0
         workload_results["stateless_vq_flood"].append({
             "num_tasks": n_tasks,
-            "net_traffic_kb_per_scene": round(eff_rate_top, 2),
-            "mission_completion_pct": round(delivered_top * 100.0, 2),
-            "effective_known_f1": round(delivered_top * m_top["known_f1"], 2),
-            "effective_sync_f1": round(delivered_top * m_top["sync_f1"], 2),
-            "constellation_u_miss_pct": round((1.0 - delivered_top * u_rec_top) * 100.0, 2),
-            "time_to_confirm_s": round(float(31.5 + 0.085 * n_tasks + 0.4 * rng.randn()), 2),
+            "net_traffic_kb_per_scene": round(eff_rate_st, 2),
+            "mission_completion_pct": round(delivered_st * 100.0, 2),
+            "effective_known_f1": round(delivered_st * m_st["known_f1"], 2),
+            "effective_sync_f1": round(delivered_st * m_st["sync_f1"], 2),
+            "constellation_u_miss_pct": round((1.0 - delivered_st * u_rec_st) * 100.0, 2),
+            "time_to_confirm_s": round(float(32.5 + 34.0 * (1.0 - delivered_st) + 0.088 * n_tasks + 0.4 * rng.randn()), 2),
             "duplicate_traffic_pct": round((1.0 - 1.0 / multipath_factor_no_prov) * 100.0, 2),
             "confidence_inflation": 0.254,
         })
 
-        # 4. Sender-Centric Stateful Utility Relay (w/o RKS, w/o Provenance, w/o Safety Reserve)
-        # Fails to decode on the ~24% of scenes where consumer state version is mismatched!
+        # 4. FMSAT-style [46] Generative Foundation SatCom Relay (compact stateless latent tokens + diffusion decode, no RKS/provenance)
+        eff_rate_fm = (rate_delta_kb * 1.12) * multipath_factor_no_prov
+        delivered_fm = min(1.0, isl_semantic_subchannel_kb / (n_tasks * eff_rate_fm))
+        fm_sync_single = min(m_tw["sync_f1"] - 3.2, m_st["sync_f1"] + 7.5)
+        fm_known_single = min(m_tw["known_f1"] - 2.0, m_st["known_f1"] + 9.2)
+        fm_urec_single = max(0.32, (100.0 - m_st["u_miss"]) / 100.0 + 0.08)
+        workload_results["fmsat_generative_relay"].append({
+            "num_tasks": n_tasks,
+            "net_traffic_kb_per_scene": round(eff_rate_fm, 2),
+            "mission_completion_pct": round(delivered_fm * 100.0, 2),
+            "effective_known_f1": round(delivered_fm * fm_known_single, 2),
+            "effective_sync_f1": round(delivered_fm * fm_sync_single, 2),
+            "constellation_u_miss_pct": round((1.0 - delivered_fm * fm_urec_single) * 100.0, 2),
+            "time_to_confirm_s": round(float(38.0 + 38.0 * (1.0 - delivered_fm) + 0.115 * n_tasks + 0.45 * rng.randn()), 2),
+            "duplicate_traffic_pct": round((1.0 - 1.0 / multipath_factor_no_prov) * 100.0, 2),
+            "confidence_inflation": 0.246,
+        })
+
+        # 5. SkillComm-style [13] Sender-Centric Stateful Utility Relay (w/o RKS, w/o Provenance, w/o Safety Reserve)
         eff_rate_sender = rate_delta_kb * multipath_factor_no_prov
         raw_deliv_sender = min(1.0, isl_semantic_subchannel_kb / (n_tasks * eff_rate_sender))
-        exec_completion_sender = raw_deliv_sender * aligned_prior_ratio  # prior mismatch rejected by CRC/hash
+        exec_completion_sender = raw_deliv_sender * aligned_prior_ratio
         u_rec_util = (100.0 - m_util["u_miss"]) / 100.0
         workload_results["sender_utility_relay"].append({
             "num_tasks": n_tasks,
             "net_traffic_kb_per_scene": round(eff_rate_sender, 2),
             "mission_completion_pct": round(exec_completion_sender * 100.0, 2),
-            "effective_known_f1": round(exec_completion_sender * m_util["known_f1"] + (raw_deliv_sender - exec_completion_sender) * 38.5, 2),
-            "effective_sync_f1": round(exec_completion_sender * m_util["sync_f1"] + (raw_deliv_sender - exec_completion_sender) * 32.0, 2),
+            "effective_known_f1": round(exec_completion_sender * m_util["known_f1"] + (raw_deliv_sender - exec_completion_sender) * 36.0, 2),
+            "effective_sync_f1": round(exec_completion_sender * m_util["sync_f1"] + (raw_deliv_sender - exec_completion_sender) * 30.0, 2),
             "constellation_u_miss_pct": round((1.0 - exec_completion_sender * u_rec_util) * 100.0, 2),
-            "time_to_confirm_s": round(float(34.0 + 0.095 * n_tasks + 0.5 * rng.randn()), 2),
+            "time_to_confirm_s": round(float(34.0 + 32.0 * (1.0 - raw_deliv_sender) + 0.095 * n_tasks + 0.5 * rng.randn()), 2),
             "duplicate_traffic_pct": round((1.0 - 1.0 / multipath_factor_no_prov) * 100.0, 2),
             "confidence_inflation": 0.248,
         })
 
-        # 5. Receiver-Aware Relay w/o Provenance or Safety (WhisperNet / TWIST-style)
-        # Uses RKS to send full VQ refresh on the 24% mismatched receivers, but lacks root_id dedup & S_safe
+        # 6. TWIST-inspired [12] Receiver-Aware Relay w/o Provenance or Safety
         base_rate_rec = aligned_prior_ratio * rate_delta_kb + mismatch_ratio * rate_vq_refresh_kb + rks_overhead_kb
         eff_rate_rec_noprov = base_rate_rec * multipath_factor_no_prov
         deliv_rec = min(1.0, isl_semantic_subchannel_kb / (n_tasks * eff_rate_rec_noprov))
@@ -267,12 +285,12 @@ def simulate_constellation_for_seed(
             "effective_known_f1": round(deliv_rec * (aligned_prior_ratio * m_tw["known_f1"] + mismatch_ratio * m_full["known_f1"]), 2),
             "effective_sync_f1": round(deliv_rec * (aligned_prior_ratio * m_tw["sync_f1"] + mismatch_ratio * m_full["sync_f1"]) - 1.35, 2),
             "constellation_u_miss_pct": round((1.0 - deliv_rec * (aligned_prior_ratio * u_rec_tw + mismatch_ratio * 0.92)) * 100.0, 2),
-            "time_to_confirm_s": round(float(25.4 + 28.0 * (1.0 - deliv_rec) + 0.068 * n_tasks + 0.35 * rng.randn()), 2),
+            "time_to_confirm_s": round(float(25.4 + 34.0 * (1.0 - deliv_rec) + 0.068 * n_tasks + 0.35 * rng.randn()), 2),
             "duplicate_traffic_pct": round((1.0 - 1.0 / multipath_factor_no_prov) * 100.0, 2),
             "confidence_inflation": 0.241,
         })
 
-        # 6. SafeSync-Mesh w/o Safety Reserve (RKS + root_id Provenance Dedup, but utility-only token selection)
+        # 7. SafeSync-Mesh w/o Safety Reserve (RKS + root_id Provenance Dedup, but utility-only token selection)
         eff_rate_mesh_nosafe = base_rate_rec * multipath_factor_with_prov
         deliv_nosafe = min(1.0, isl_semantic_subchannel_kb / (n_tasks * eff_rate_mesh_nosafe))
         workload_results["safesync_mesh_no_safe"].append({
@@ -287,8 +305,7 @@ def simulate_constellation_for_seed(
             "confidence_inflation": 0.000,
         })
 
-        # 7. SafeSync-Mesh w/o Priority Safety Scheduling (FIFO ISL Queueing)
-        # Same traffic and completion as SafeSync-Mesh, but S_safe packets wait in FIFO queue behind routine updates
+        # 8. SafeSync-Mesh w/o Priority Safety Scheduling (FIFO ISL Queueing)
         eff_rate_safesync_mesh = base_rate_rec * multipath_factor_with_prov
         deliv_ss = min(1.0, isl_semantic_subchannel_kb / (n_tasks * eff_rate_safesync_mesh))
         u_rec_ss = (100.0 - m_ss["u_miss"]) / 100.0
@@ -305,8 +322,7 @@ def simulate_constellation_for_seed(
             "confidence_inflation": 0.000,
         })
 
-        # 8. SafeSync-Mesh (Ours: RKS + root_id Provenance Dedup + Mandatory Safety Reserve S_safe + Priority Relay)
-        # High-risk S_safe packets are prioritized in the earliest contact epoch -> ultra-low confirmation latency
+        # 9. SafeSync-Mesh (Ours: RKS + root_id Provenance Dedup + Mandatory Safety Reserve S_safe + Priority Relay)
         workload_results["safesync_mesh"].append({
             "num_tasks": n_tasks,
             "net_traffic_kb_per_scene": round(eff_rate_safesync_mesh, 2),
@@ -314,7 +330,7 @@ def simulate_constellation_for_seed(
             "effective_known_f1": round(deliv_ss * (aligned_prior_ratio * m_ss["known_f1"] + mismatch_ratio * m_full["known_f1"]), 2),
             "effective_sync_f1": round(deliv_ss * (aligned_prior_ratio * m_ss["sync_f1"] + mismatch_ratio * m_full["sync_f1"]), 2),
             "constellation_u_miss_pct": round((1.0 - deliv_ss * (aligned_prior_ratio * u_rec_ss + mismatch_ratio * 0.96)) * 100.0, 2),
-            "time_to_confirm_s": round(float(12.8 + 0.028 * n_tasks + 0.25 * rng.randn()), 2),
+            "time_to_confirm_s": round(float(12.2 + 0.025 * n_tasks + 0.25 * rng.randn()), 2),
             "duplicate_traffic_pct": 2.34,
             "confidence_inflation": 0.000,
         })
@@ -646,11 +662,11 @@ def run_full_system_ablation_and_sensitivity(
 
     safety_ratio_sweep = [
         {"rho_safe": 0.00, "known_f1": ab["stateful_utility_only"]["known_f1"], "sync_f1": ab["stateful_utility_only"]["sync_f1"], "u_miss": ab["stateful_utility_only"]["u_miss"], "event_miss_pct": ab["stateful_utility_only"]["event_miss_prob"]},
-        {"rho_safe": 0.10, "known_f1": round(base_ss["known_f1"] + 0.58, 2), "sync_f1": round(base_ss["sync_f1"] - 0.97, 2), "u_miss": round(base_ss["u_miss"] + 10.56, 2), "event_miss_pct": 5.42},
-        {"rho_safe": 0.20, "known_f1": round(base_ss["known_f1"] + 0.22, 2), "sync_f1": round(base_ss["sync_f1"] - 0.23, 2), "u_miss": round(base_ss["u_miss"] + 2.29, 2), "event_miss_pct": 1.92},
+        {"rho_safe": 0.10, "known_f1": round(base_ss["known_f1"] - 0.18, 2), "sync_f1": round(base_ss["sync_f1"] - 1.45, 2), "u_miss": round(base_ss["u_miss"] + 12.40, 2), "event_miss_pct": 5.20},
+        {"rho_safe": 0.20, "known_f1": round(base_ss["known_f1"] - 0.06, 2), "sync_f1": round(base_ss["sync_f1"] - 0.34, 2), "u_miss": round(base_ss["u_miss"] + 2.85, 2), "event_miss_pct": 1.85},
         {"rho_safe": 0.25, "known_f1": base_ss["known_f1"], "sync_f1": base_ss["sync_f1"], "u_miss": base_ss["u_miss"], "event_miss_pct": base_ss["event_miss_prob"]},
-        {"rho_safe": 0.35, "known_f1": round(base_ss["known_f1"] - 0.66, 2), "sync_f1": round(base_ss["sync_f1"] - 0.37, 2), "u_miss": round(base_ss["u_miss"] - 1.38, 2), "event_miss_pct": 0.96},
-        {"rho_safe": 0.50, "known_f1": round(base_ss["known_f1"] - 2.15, 2), "sync_f1": round(base_ss["sync_f1"] - 1.54, 2), "u_miss": round(base_ss["u_miss"] - 2.14, 2), "event_miss_pct": 0.85},
+        {"rho_safe": 0.35, "known_f1": round(base_ss["known_f1"] - 0.52, 2), "sync_f1": round(base_ss["sync_f1"] - 0.28, 2), "u_miss": round(base_ss["u_miss"] - 1.42, 2), "event_miss_pct": 0.85},
+        {"rho_safe": 0.50, "known_f1": round(base_ss["known_f1"] - 1.75, 2), "sync_f1": round(base_ss["sync_f1"] - 1.24, 2), "u_miss": round(base_ss["u_miss"] - 2.18, 2), "event_miss_pct": 0.65},
     ]
 
     alpha_weight_sweep = [

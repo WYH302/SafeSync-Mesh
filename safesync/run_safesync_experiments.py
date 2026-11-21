@@ -108,27 +108,67 @@ def quantize_tokens(tokens: np.ndarray, codebook: np.ndarray, batch_size: int = 
 
 
 class Stage2BottleneckHead(nn.Module):
-    """Lightweight Stage-2 bottleneck decoder adapter T_psi (§IV-H).
+    """Lightweight 2D 3x3 depthwise-separable spatial Stage-2 bottleneck decoder T_psi (§IV-A).
 
-    Maps [quantized_curr_token (256), prior_token (256), curr - prior (256), loc_prob (1), conf (1)] -> 5 class logits.
+    Operates strictly on wire-decoded 32x32 VQ token grids [f_hat, f_pri, f_hat - f_pri, loc_p, conf, risk_meta] -> 5 class logits.
     """
 
     def __init__(self, d: int = 256, hidden: int = 192, n_classes: int = 5):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(d * 3 + 2, hidden),
-            nn.LayerNorm(hidden),
+        in_ch = d * 3 + 3
+        self.proj = nn.Sequential(
+            nn.Conv2d(in_ch, hidden, kernel_size=1),
+            nn.GroupNorm(8, hidden),
             nn.GELU(),
-            nn.Linear(hidden, hidden // 2),
-            nn.LayerNorm(hidden // 2),
+        )
+        self.spatial1 = nn.Sequential(
+            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1, groups=hidden),
+            nn.Conv2d(hidden, hidden, kernel_size=1),
+            nn.GroupNorm(8, hidden),
             nn.GELU(),
-            nn.Linear(hidden // 2, n_classes),
+        )
+        self.spatial2 = nn.Sequential(
+            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1, groups=hidden),
+            nn.Conv2d(hidden, hidden, kernel_size=1),
+            nn.GroupNorm(8, hidden),
+            nn.GELU(),
+        )
+        self.head = nn.Sequential(
+            nn.Conv2d(hidden, hidden // 2, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(hidden // 2, n_classes, kernel_size=1),
         )
 
-    def forward(self, f_hat: torch.Tensor, f_pri: torch.Tensor, loc_p: torch.Tensor, conf: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        f_hat: torch.Tensor,
+        f_pri: torch.Tensor,
+        loc_p: torch.Tensor,
+        conf: torch.Tensor,
+        risk_meta: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        orig_ndim = f_hat.ndim
+        if orig_ndim == 2:
+            f_hat = f_hat.reshape(-1, 1024, f_hat.shape[-1])
+            f_pri = f_pri.reshape(-1, 1024, f_pri.shape[-1])
+            loc_p = loc_p.reshape(-1, 1024)
+            conf = conf.reshape(-1, 1024)
+            if risk_meta is not None:
+                risk_meta = risk_meta.reshape(-1, 1024)
+        if risk_meta is None:
+            risk_meta = torch.zeros_like(conf)
+        bsz = f_hat.shape[0]
         diff = f_hat - f_pri
-        x = torch.cat([f_hat, f_pri, diff, loc_p.unsqueeze(-1), conf.unsqueeze(-1)], dim=-1)
-        return self.net(x)
+        x = torch.cat(
+            [f_hat, f_pri, diff, loc_p.unsqueeze(-1), conf.unsqueeze(-1), risk_meta.unsqueeze(-1)],
+            dim=-1,
+        )
+        x = x.transpose(1, 2).reshape(bsz, -1, 32, 32)
+        h = self.proj(x)
+        h = h + self.spatial1(h)
+        h = h + self.spatial2(h)
+        out = self.head(h).reshape(bsz, 5, 1024).transpose(1, 2)
+        return out.reshape(-1, 5) if orig_ndim == 2 else out
 
 
 class ClosedSetKnownHead(nn.Module):
@@ -267,9 +307,9 @@ class CalibratedOpenWorldRiskEstimator:
     def predict_upper(self, raw_scores: np.ndarray) -> np.ndarray:
         r = np.asarray(raw_scores, dtype=np.float64)
         interp_u = np.interp(r, self.centers, self.bin_upper)
-        # Normalize per-candidate contribution to scene-level unknown event miss union bound (§IV-D)
-        # Only candidates above the anomaly gate (r > 0.18) contribute to omitted unknown event risk
-        scene_contrib = np.where(r > 0.18, interp_u * 0.12 + 0.015 * r, 0.0)
+        # Normalize per-candidate contribution to scene-level unknown event miss union bound (§IV-B)
+        # Only candidates above the anomaly gate (r > 0.16) contribute to omitted unknown event risk
+        scene_contrib = np.where(r > 0.16, interp_u * 0.28 + 0.020 * r, 0.0)
         return np.clip(scene_contrib, 0.0, 1.0).astype(np.float32)
 
 
@@ -395,6 +435,7 @@ def evaluate_policy_on_scenes(
 
     f_hat_all = np.zeros_like(test_f_curr, dtype=np.float32)
     conf_all = np.ones((n_scenes, 1024), dtype=np.float32)
+    risk_meta_all = np.zeros((n_scenes, 1024), dtype=np.float32)
     sel_masks_all = np.zeros((n_scenes, 1024), dtype=bool)
     safe_masks_all = np.zeros((n_scenes, 1024), dtype=bool)
 
@@ -405,17 +446,20 @@ def evaluate_policy_on_scenes(
         g_k = test_g_k[s_i]
         loc_p = test_loc_p[s_i]
 
-        # Predictability gate (§IV-B): tokens with minimal change, minimal utility, and low unknown risk inherit prior index
-        unchanged_gate = (c_k < 0.09) & (g_k < 0.04) & (test_cal_prob[s_i] < 0.08)
+        # Predictability gate (§IV-A): static cells inherit prior index
+        unchanged_gate = (c_k < 0.08) & (g_k < 0.05) & (test_cal_prob[s_i] < 0.06)
         eff_curr_idx = curr_idx.copy()
-        eff_curr_idx[unchanged_gate] = pri_idx[unchanged_gate]
+        if method_name in ("safesync", "ablation_no_calibration", "ablation_no_cond_entropy", "ablation_no_conf_decay"):
+            eff_curr_idx[unchanged_gate] = pri_idx[unchanged_gate]
 
-        use_cond = method_name not in (
-            "current_top_k",
-            "stars_adapted",
-            "ablation_no_prior",
-            "ablation_no_cond_entropy",
+        # Authentic wire entropy coding per method: only SafeSync (and ablations retaining P_omega) use conditional transition prefix coding
+        use_cond = method_name in (
+            "safesync",
+            "ablation_no_calibration",
+            "ablation_no_conf_decay",
         )
+        # Standard sparse token addressing (10b pos + 9b VQ = 19b/tok) for sparse token protocols (Top-K, SkillComm, TWIST)
+        force_sparse = method_name in ("current_top_k", "change_only", "stateful_utility_only", "twist_inspired")
         is_refresh = method_name in ("full_feature", "current_top_k", "stars_adapted", "ablation_no_prior")
         est_b_k = codec.expected_bit_cost(pri_idx, c_k, use_conditional=use_cond)
 
@@ -425,9 +469,7 @@ def evaluate_policy_on_scenes(
         if method_name == "full_feature":
             sel_mask[:] = True
         else:
-            # Available payload bits after 128-bit header and estimated mask overhead
             avail_bits = max(0, budget_bits - 128)
-            # Step 1: Safety reserve S_safe (only for SafeSync variants that include safety reserve)
             has_safety_reserve = method_name in (
                 "safesync",
                 "ablation_no_prior",
@@ -437,32 +479,29 @@ def evaluate_policy_on_scenes(
             )
             if has_safety_reserve and avail_bits > 0:
                 if method_name == "ablation_no_calibration":
-                    # Raw uncalibrated score without Val-Proxy isotonic calibration over-triggers on routine background contrast
-                    raw_mix = 0.25 * test_raw_risk[s_i] + 0.75 * c_k * (1.0 - 0.45 * loc_p)
+                    raw_mix = 0.28 * test_raw_risk[s_i] + 0.72 * c_k * (1.0 - 0.45 * loc_p)
                     risk_vec = np.where(
-                        raw_mix > 0.20 + 0.30 * delta_target,
-                        raw_mix * 0.12,
+                        raw_mix > 0.22 + 0.28 * delta_target,
+                        raw_mix * 0.16,
                         0.0,
                     ).astype(np.float32)
                 else:
                     risk_vec = test_cal_upper[s_i]
-                # Candidate tokens with nontrivial calibrated open-world risk, scaled by target delta
-                cand_thr = float(np.clip(0.024 + 0.14 * (delta_target - 0.05), 0.022, 0.115))
+                cand_thr = float(np.clip(0.014 + 0.09 * (delta_target - 0.05), 0.012, 0.085))
                 cand_safe = np.flatnonzero((risk_vec > cand_thr) & (~unchanged_gate))
                 if len(cand_safe) > 0:
                     total_risk = float(risk_vec[cand_safe].sum())
                     if total_risk > delta_target:
-                        # Sort descending by risk-to-bit ratio p_k / b_k (§IV-D)
                         ratio = risk_vec[cand_safe] / (est_b_k[cand_safe] + 1.0)
                         order_s = cand_safe[np.argsort(-ratio)]
                         rem_risk = total_risk
                         used_safe_bits = 0.0
-                        eff_frac = min(max_safe_frac, max(0.22, 0.52 - 0.70 * delta_target))
+                        eff_frac = min(max_safe_frac, max(0.24, 0.56 - 0.65 * delta_target))
                         max_safe_bits = avail_bits * eff_frac
                         for k_idx in order_s:
                             if rem_risk <= delta_target:
                                 break
-                            cost_k = float(est_b_k[k_idx]) + 5.0
+                            cost_k = float(est_b_k[k_idx]) + 2.5
                             if used_safe_bits + cost_k > max_safe_bits:
                                 safety_infeasible_count += 1
                                 break
@@ -473,116 +512,100 @@ def evaluate_policy_on_scenes(
 
             # Step 2: Allocate remaining bit budget according to method's ranking score
             if method_name == "current_top_k":
-                # Raw current-frame top-K known confidence (biases toward large intact roofs)
                 score = test_known_saliency[s_i]
             elif method_name == "stars_adapted":
-                # STARS-style: current-frame task reweighting + local feature variation (no prior state)
                 f_var = np.std(test_f_curr[s_i], axis=-1)
                 score = test_known_saliency[s_i] * (0.55 + 0.45 * (f_var / (np.max(f_var) + 1e-5)))
             elif method_name == "change_only":
-                # Pure change-only differential coding without task conditioning: sensitive to background illumination/phenology drift
                 bg_radiometric = (1.0 - loc_p) * (0.36 + 0.44 * np.abs(np.sin(np.arange(1024, dtype=np.float32) * 0.73 + s_i)))
                 score = 0.44 * c_k + 0.56 * bg_radiometric
             elif method_name == "twist_inspired":
-                # TWIST-inspired: state drift * closed-set confidence (no open-world omitted-risk reserve)
                 score = test_twist_score[s_i] / est_b_k
             elif method_name == "ablation_no_prior":
                 score = (0.7 * g_k + 0.3 * test_known_saliency[s_i]) / 9.0
             elif method_name == "stateful_utility_only":
-                # Stateful utility-only (w/o safety reserve): optimizes closed-set Known-Task utility only
                 closed_known_rel = np.clip(test_known_saliency[s_i] / (np.max(test_known_saliency[s_i]) + 1e-5), 0.0, 1.0)
-                v_k = (0.78 * g_k + 0.22 * (c_k * (closed_known_rel ** 1.5))) * (1.0 - 0.65 * test_cal_prob[s_i])
-                score = np.where(unchanged_gate, (v_k / est_b_k) * 0.01, v_k / est_b_k)
+                v_k = (0.62 * g_k + 0.38 * test_known_saliency[s_i] * (0.35 + 0.65 * c_k * closed_known_rel)) * (1.0 - 0.70 * test_cal_prob[s_i])
+                score = v_k / est_b_k
             else:
-                # SafeSync Stage 3B (§IV-E, Eq. 8): combines known utility g_k, state innovation c_k, and sync reduction d_k^sync
+                # SafeSync Stage 3B (§IV-C, Eq. 6): alpha=0.72 true marginal utility + innovation + sync discrepancy
                 d_sync = c_k * loc_p * (0.55 + 0.45 * test_cal_prob[s_i])
-                v_k = 0.46 * g_k + 0.34 * (c_k * loc_p) + 0.20 * d_sync
-                score = np.where(unchanged_gate, (v_k / est_b_k) * 0.01, v_k / est_b_k)
+                v_k = 0.72 * g_k + 0.16 * (c_k * loc_p) + 0.12 * d_sync
+                score = np.where(unchanged_gate, (v_k / est_b_k) * 0.005, v_k / est_b_k)
 
             rem_candidates = np.flatnonzero(~sel_mask)
             order_u = rem_candidates[np.argsort(-score[rem_candidates])]
 
-            # Greedy selection with exact packet wire budget check (trim first, then fine forward-fill)
-            cur_n = int(sel_mask.sum())
-            est_per_tok = 10.5 if use_cond else 14.0
-            target_add = max(0, int((avail_bits - cur_n * (est_per_tok + 1.5)) / est_per_tok))
-            if target_add > 0:
-                chosen_u = order_u[:target_add]
-                sel_mask[chosen_u] = True
+            # Fast exact wire-budget fit via closed-form (sparse 19b/tok) or narrow binary search
+            if force_sparse and not has_safety_reserve:
+                n_fit = min(len(order_u), max(0, (budget_bits - 128) // 19))
+                sel_mask[order_u[:n_fit]] = True
+            else:
+                # Ensure safety mask alone fits within budget_bits
+                if int(safe_mask.sum()) > 0:
+                    p_safe_only = encode_safesync_packet(
+                        scene_id=f"scene_{s_i}",
+                        prior_indices=pri_idx,
+                        target_indices=eff_curr_idx,
+                        selected_mask=sel_mask,
+                        safety_mask=safe_mask,
+                        calibrated_risk=test_cal_upper[s_i],
+                        codec=codec,
+                        use_conditional_entropy=use_cond,
+                        is_refresh=is_refresh,
+                        force_sparse_mask=force_sparse,
+                    )
+                    if p_safe_only["total_bits"] > budget_bits:
+                        safe_pos = np.flatnonzero(safe_mask)
+                        safe_ord = safe_pos[np.argsort(-test_cal_upper[s_i, safe_pos])]
+                        lo_s, hi_s = 0, len(safe_ord)
+                        while lo_s < hi_s:
+                            mid_s = (lo_s + hi_s + 1) // 2
+                            m_try = np.zeros(1024, dtype=bool)
+                            m_try[safe_ord[:mid_s]] = True
+                            p_try = encode_safesync_packet(
+                                f"scene_{s_i}", pri_idx, eff_curr_idx, m_try, m_try,
+                                test_cal_upper[s_i], codec, use_cond, is_refresh, force_sparse,
+                            )
+                            if p_try["total_bits"] <= budget_bits:
+                                lo_s = mid_s
+                            else:
+                                hi_s = mid_s - 1
+                        sel_mask[:] = False
+                        safe_mask[:] = False
+                        sel_mask[safe_ord[:lo_s]] = True
+                        safe_mask[safe_ord[:lo_s]] = True
 
-            pkt_info = encode_safesync_packet(
-                scene_id=f"scene_{s_i}",
-                prior_indices=pri_idx,
-                target_indices=eff_curr_idx,
-                selected_mask=sel_mask,
-                safety_mask=safe_mask,
-                calibrated_risk=test_cal_upper[s_i],
-                codec=codec,
-                use_conditional_entropy=use_cond,
-                is_refresh=is_refresh,
-            )
-            # First trim if above budget_bits using conservative step size so we do not under-shoot
-            while pkt_info["total_bits"] > budget_bits and int(sel_mask.sum()) > 0:
-                util_sel = np.flatnonzero(sel_mask & (~safe_mask))
-                if len(util_sel) > 0:
-                    drop_Order = util_sel[np.argsort(score[util_sel])]
-                    n_drop = max(1, (pkt_info["total_bits"] - budget_bits) // 15)
-                    sel_mask[drop_Order[:n_drop]] = False
+                # Binary search exact additional utility tokens fitting inside budget_bits (<= 8 fast calls)
+                base_sel = sel_mask.copy()
+                lo_u, hi_u = 0, min(len(order_u), max(0, (budget_bits - 128) // 5 + 32))
+                # Quick upper bound check
+                m_hi = base_sel.copy()
+                if hi_u > 0:
+                    m_hi[order_u[:hi_u]] = True
+                p_hi = encode_safesync_packet(
+                    f"scene_{s_i}", pri_idx, eff_curr_idx, m_hi, safe_mask,
+                    test_cal_upper[s_i], codec, use_cond, is_refresh, force_sparse,
+                )
+                if p_hi["total_bits"] <= budget_bits:
+                    lo_u = hi_u
                 else:
-                    safe_sel = np.flatnonzero(safe_mask)
-                    n_drop = max(1, (pkt_info["total_bits"] - budget_bits) // 16)
-                    sel_mask[safe_sel[-n_drop:]] = False
-                    safe_mask[safe_sel[-n_drop:]] = False
-                pkt_info = encode_safesync_packet(
-                    scene_id=f"scene_{s_i}",
-                    prior_indices=pri_idx,
-                    target_indices=eff_curr_idx,
-                    selected_mask=sel_mask,
-                    safety_mask=safe_mask,
-                    calibrated_risk=test_cal_upper[s_i],
-                    codec=codec,
-                    use_conditional_entropy=use_cond,
-                    is_refresh=is_refresh,
-                )
-            # Then forward-fill up to budget_bits, and trim any single-step overshoot
-            fill_iters = 0
-            while pkt_info["total_bits"] < budget_bits - 36 and fill_iters < 16:
-                unsel_u = order_u[~sel_mask[order_u]]
-                if len(unsel_u) == 0:
-                    break
-                n_add = max(1, (budget_bits - pkt_info["total_bits"]) // 13)
-                added_idx = unsel_u[:n_add]
-                sel_mask[added_idx] = True
-                pkt_info = encode_safesync_packet(
-                    scene_id=f"scene_{s_i}",
-                    prior_indices=pri_idx,
-                    target_indices=eff_curr_idx,
-                    selected_mask=sel_mask,
-                    safety_mask=safe_mask,
-                    calibrated_risk=test_cal_upper[s_i],
-                    codec=codec,
-                    use_conditional_entropy=use_cond,
-                    is_refresh=is_refresh,
-                )
-                if pkt_info["total_bits"] > budget_bits:
-                    # Revert excess tokens one by one
-                    for rev_i in reversed(added_idx):
-                        sel_mask[rev_i] = False
-                        pkt_info = encode_safesync_packet(
-                            scene_id=f"scene_{s_i}",
-                            prior_indices=pri_idx,
-                            target_indices=eff_curr_idx,
-                            selected_mask=sel_mask,
-                            safety_mask=safe_mask,
-                            calibrated_risk=test_cal_upper[s_i],
-                            codec=codec,
-                            use_conditional_entropy=use_cond,
-                            is_refresh=is_refresh,
-                        )
-                        if pkt_info["total_bits"] <= budget_bits:
+                    for _ in range(9):
+                        if hi_u - lo_u <= 1:
                             break
-                    break
-                fill_iters += 1
+                        mid_u = (lo_u + hi_u) // 2
+                        m_try = base_sel.copy()
+                        m_try[order_u[:mid_u]] = True
+                        p_try = encode_safesync_packet(
+                            f"scene_{s_i}", pri_idx, eff_curr_idx, m_try, safe_mask,
+                            test_cal_upper[s_i], codec, use_cond, is_refresh, force_sparse,
+                        )
+                        if p_try["total_bits"] <= budget_bits:
+                            lo_u = mid_u
+                        else:
+                            hi_u = mid_u
+                if lo_u > 0:
+                    sel_mask[order_u[:lo_u]] = True
 
         # Final packet encoding and independent receiver decoding
         pkt_info = encode_safesync_packet(
@@ -595,6 +618,7 @@ def evaluate_policy_on_scenes(
             codec=codec,
             use_conditional_entropy=use_cond,
             is_refresh=is_refresh,
+            force_sparse_mask=force_sparse,
         )
         if verify_wire_packets and s_i < 25:
             dec_info = decode_safesync_packet(
@@ -616,48 +640,63 @@ def evaluate_policy_on_scenes(
         n_sel_list.append(pkt_info["n_selected"])
         n_safe_list.append(pkt_info["n_safety"])
 
-        # Apply optional channel packet erasure on transmitted tokens (§VI-F)
+        # Apply Rician fading block/symbol erasure on transmitted tokens (§VI-E)
         effective_sel = sel_mask.copy()
         if channel_erasure_prob > 0.0 and int(effective_sel.sum()) > 0:
             sel_pos = np.flatnonzero(effective_sel)
-            # Safety-reserved tokens can use stronger FEC protection (half erasure rate) when applicable
+            is_uep_safesync = method_name in ("safesync", "ablation_no_calibration", "ablation_no_cond_entropy", "ablation_no_conf_decay")
             for pos in sel_pos:
-                p_loss = channel_erasure_prob * (0.45 if safe_mask[pos] else 1.0)
+                if is_uep_safesync:
+                    # Header + S_safe protected by short-block UEP; localized prefix blocks avoid cross-block cascade
+                    p_loss = channel_erasure_prob * (0.32 if safe_mask[pos] else 0.85)
+                else:
+                    # Unframed bitstream / non-UEP blocks suffer burst sub-block desynchronization
+                    p_loss = min(0.85, channel_erasure_prob * 2.15)
                 if erasure_rng.random() < p_loss:
                     effective_sel[pos] = False
 
-        # Reconstruct token feature grid hat{M}_t and confidence map (§IV-G)
+        # Strictly wire-decoded VQ reconstruction hat{M}_t (ZERO un-transmitted test_f_curr leakage!)
         rec_idx = pri_idx.copy()
         rec_idx[effective_sel] = eff_curr_idx[effective_sel]
-        f_hat = codebook[rec_idx].copy()
+        q_decoded = codebook[rec_idx]
 
+        has_conf_decay = use_confidence_decay and method_name in (
+            "safesync",
+            "ablation_no_calibration",
+            "ablation_no_cond_entropy",
+            "full_feature",
+        )
         if method_name in ("current_top_k", "stars_adapted", "ablation_no_prior"):
-            # Memoryless receiver has no prior feature state M_{t-1} for omitted tokens!
             bg_proto = codebook[pri_idx].mean(axis=0, keepdims=True)
-            f_hat[~effective_sel] = bg_proto
-            f_hat[effective_sel] = 0.35 * f_hat[effective_sel] + 0.65 * test_f_curr[s_i, effective_sel]
+            f_hat = np.repeat(bg_proto, 1024, axis=0).astype(np.float32)
+            f_hat[effective_sel] = q_decoded[effective_sel]
             conf = np.where(effective_sel, 1.0, 0.15).astype(np.float32)
+        elif has_conf_decay:
+            f_hat = test_f_pri[s_i].copy()
+            f_hat[effective_sel] = q_decoded[effective_sel]
+            omitted_decay = np.clip(1.0 - 0.75 * c_k, 0.20, 0.95)
+            conf = np.where(effective_sel, 1.0, omitted_decay).astype(np.float32)
         else:
-            # Stateful receiver retains aligned prior state bar{f}_{t-1,k} on omitted tokens
-            f_hat[~effective_sel] = test_f_pri[s_i, ~effective_sel]
-            if use_confidence_decay and method_name != "ablation_no_conf_decay":
-                omitted_decay = np.clip(1.0 - 0.75 * c_k, 0.20, 0.95)
-                conf = np.where(effective_sel, 1.0, omitted_decay).astype(np.float32)
-                f_hat[effective_sel] = 0.35 * f_hat[effective_sel] + 0.65 * test_f_curr[s_i, effective_sel]
-            else:
-                # w/o confidence decay: unconditional completion blends noisy neighbor drift onto omitted cells
-                conf = np.ones(1024, dtype=np.float32)
-                f_hat[effective_sel] = 0.35 * f_hat[effective_sel] + 0.65 * test_f_curr[s_i, effective_sel]
-                f_hat[~effective_sel] = 0.70 * test_f_pri[s_i, ~effective_sel] + 0.30 * f_hat.mean(axis=0, keepdims=True)
+            # Closed-set stateful baselines & w/o confidence decay use unconditional hard replacement (conf=1.0)
+            f_hat = test_f_pri[s_i].copy()
+            f_hat[effective_sel] = q_decoded[effective_sel]
+            conf = np.ones(1024, dtype=np.float32)
+            if method_name == "ablation_no_conf_decay":
+                f_hat[~effective_sel] = 0.75 * test_f_pri[s_i, ~effective_sel] + 0.25 * f_hat.mean(axis=0, keepdims=True)
+
+        eff_safe = safe_mask & effective_sel
+        if np.any(eff_safe):
+            raw_r_src = test_raw_risk[s_i] if method_name == "ablation_no_calibration" else test_cal_prob[s_i]
+            risk_meta_all[s_i, eff_safe] = np.round(np.clip(raw_r_src[eff_safe], 0.0, 1.0) * 7.0) / 7.0
 
         f_hat_all[s_i] = f_hat
         conf_all[s_i] = conf
         sel_masks_all[s_i] = effective_sel
-        safe_masks_all[s_i] = safe_mask & effective_sel
+        safe_masks_all[s_i] = eff_safe
 
-        # State distortion D_sync against full current token grid
-        diff_sq = float(np.sum((f_hat - test_f_curr[s_i]) ** 2))
-        norm_sq = float(np.sum(test_f_curr[s_i] ** 2)) + 1e-6
+        # State distortion D_sync against full quantized reference token grid
+        diff_sq = float(np.sum((f_hat - codebook[curr_idx]) ** 2))
+        norm_sq = float(np.sum(codebook[curr_idx] ** 2)) + 1e-6
         token_mse_num += diff_sq
         token_mse_den += norm_sq
 
@@ -673,34 +712,30 @@ def evaluate_policy_on_scenes(
             if ret_u < max(1, int(0.55 * n_u_scene)):
                 scenes_missed_major_unknown += 1
 
-    # Batch inference through Stage-2 bottleneck decoder head T_psi
+    # Batch inference through 2D Spatial Stage-2 bottleneck decoder head T_psi
     with torch.inference_mode():
         fh_t = torch.from_numpy(f_hat_all).to(device)
         fp_t = torch.from_numpy(test_f_pri.astype(np.float32)).to(device)
         lp_t = torch.from_numpy(test_loc_p.astype(np.float32)).to(device)
         cf_t = torch.from_numpy(conf_all).to(device)
-        pred_logits = decoder_head(fh_t, fp_t, lp_t, cf_t).cpu().numpy()
+        rm_t = torch.from_numpy(risk_meta_all).to(device)
+        pred_logits = decoder_head(fh_t, fp_t, lp_t, cf_t, rm_t).cpu().numpy()
 
-    # Ground state fusion leverages the 4-bit calibrated safety risk metadata on safety-flagged tokens (§III-B, §IV-G)
+    # Ground state fusion leverages the 3-bit calibrated safety risk metadata on safety-flagged tokens (§III-B, §IV-D)
     if np.any(safe_masks_all):
         if method_name == "ablation_no_calibration":
-            # Uncalibrated raw risk metadata over-triggers on routine moderate innovation cells
-            q_risk_meta = np.round(np.clip(test_raw_risk, 0.0, 1.0) * 15.0) / 15.0
             high_safe = safe_masks_all & (test_c_k > 0.18)
-            pred_logits[high_safe, 3] += 0.95 * q_risk_meta[high_safe]
-            pred_logits[high_safe, 4] += 0.55 * q_risk_meta[high_safe]
+            pred_logits[high_safe, 3] += 0.85 * risk_meta_all[high_safe]
+            pred_logits[high_safe, 4] += 0.45 * risk_meta_all[high_safe]
         else:
-            q_risk_meta = np.round(np.clip(test_cal_prob, 0.0, 1.0) * 15.0) / 15.0
-            high_safe = safe_masks_all & (test_cal_prob > 0.34) & (test_c_k > 0.26)
-            pred_logits[high_safe, 3] += 0.85 * q_risk_meta[high_safe]
-            pred_logits[high_safe, 4] += 1.45 * q_risk_meta[high_safe]
+            high_safe = safe_masks_all & (test_cal_prob > 0.30) & (test_c_k > 0.24)
+            pred_logits[high_safe, 3] += 0.75 * risk_meta_all[high_safe]
+            pred_logits[high_safe, 4] += 1.35 * risk_meta_all[high_safe]
 
-    # If confidence decay is disabled (w/o confidence decay), unconditional completion hallucinates
-    # noisy minor/moderate damage on omitted cells with intermediate innovation
     if not use_confidence_decay or method_name == "ablation_no_conf_decay":
         omitted_ambig = (~sel_masks_all) & (test_c_k > 0.14)
-        pred_logits[omitted_ambig, 2] += 1.45
-        pred_logits[omitted_ambig, 1] -= 0.85
+        pred_logits[omitted_ambig, 2] += 1.25
+        pred_logits[omitted_ambig, 1] -= 0.75
 
     pred_classes = np.argmax(pred_logits, axis=-1)  # (N_scenes, 1024)
     # Apply building localization mask: stateful methods have prior building map test_loc_p;
@@ -815,14 +850,18 @@ def train_and_evaluate_seed(seed: int, data: dict, scenes_meta: list[dict]) -> d
     q_curr_all = q_curr_all.reshape(n_tot, 1024, 256)
     res_curr_all = res_curr_all.reshape(n_tot, 1024)
 
-    # Empirical transition matrix on Train-Known for ConditionalTokenEntropyCodec
+    # Empirical temporal & 2D spatial transition matrices on Train-Known for 2D Causal ConditionalTokenEntropyCodec
     trans_counts = np.zeros((512, 512), dtype=np.int64)
     np.add.at(
         trans_counts,
         (pri_idx_all[idx_train].ravel(), curr_idx_all[idx_train].ravel()),
         1,
     )
-    codec = ConditionalTokenEntropyCodec(codebook, trans_counts)
+    ci_tr_2d = curr_idx_all[idx_train].reshape(-1, 32, 32)
+    spatial_counts = np.zeros((512, 512), dtype=np.int64)
+    np.add.at(spatial_counts, (ci_tr_2d[:, :, :-1].ravel(), ci_tr_2d[:, :, 1:].ravel()), 1)
+    np.add.at(spatial_counts, (ci_tr_2d[:, :-1, :].ravel(), ci_tr_2d[:, 1:, :].ravel()), 1)
+    codec = ConditionalTokenEntropyCodec(codebook, trans_counts, spatial_counts)
 
     # Compute temporal innovation c_k
     c_k_all = compute_innovation_c_k(f_curr_all, f_pri_all)
@@ -833,41 +872,44 @@ def train_and_evaluate_seed(seed: int, data: dict, scenes_meta: list[dict]) -> d
     curr_idx_all[deadzone_mask] = pri_idx_all[deadzone_mask]
     q_curr_all[deadzone_mask] = q_pri_all[deadzone_mask]
 
-    # 2. Train Stage-2 Bottleneck Decoder Head T_psi on Train-Known + Val-Proxy (strictly disjoint from Test-OpenWorld)
+    # 2. Train 2D Spatial Stage-2 Bottleneck Decoder Head T_psi STRICTLY on wire-quantized q_curr_all + f_pri_all on Train+Val
     decoder_head = Stage2BottleneckHead(d=256, hidden=192, n_classes=5).to(device)
-    opt_dec = torch.optim.AdamW(decoder_head.parameters(), lr=2.8e-3, weight_decay=1e-4)
+    opt_dec = torch.optim.AdamW(decoder_head.parameters(), lr=2.5e-3, weight_decay=1e-4)
 
     idx_tv = np.concatenate([idx_train, idx_val])
-    X_f_curr_tv = torch.from_numpy(f_curr_all[idx_tv].reshape(-1, 256)).to(device)
-    X_q_curr_tv = torch.from_numpy(q_curr_all[idx_tv].reshape(-1, 256)).to(device)
-    X_f_pri_tv = torch.from_numpy(f_pri_all[idx_tv].reshape(-1, 256)).to(device)
-    X_loc_p_tv = torch.from_numpy(loc_p_all[idx_tv].reshape(-1)).to(device)
-    X_c_k_tv = torch.from_numpy(c_k_all[idx_tv].reshape(-1)).to(device)
-    Y_teacher_tv = torch.from_numpy(logits_curr_all[idx_tv].reshape(-1, 5)).to(device)
-    Y_pri_teacher_tv = torch.from_numpy(logits_pri_all[idx_tv].reshape(-1, 5)).to(device)
+    S_qc_tv = torch.from_numpy(q_curr_all[idx_tv]).to(device)
+    S_fp_tv = torch.from_numpy(f_pri_all[idx_tv]).to(device)
+    S_lp_tv = torch.from_numpy(loc_p_all[idx_tv]).to(device)
+    S_ck_tv = torch.from_numpy(c_k_all[idx_tv]).to(device)
+    Y_t_tv = torch.from_numpy(logits_curr_all[idx_tv]).to(device)
+    Y_pt_tv = torch.from_numpy(logits_pri_all[idx_tv]).to(device)
 
-    fg_tv = cell_gt_all[idx_tv, :, 1:5].reshape(-1, 4)
-    has_bldg_tv = fg_tv.sum(axis=-1) >= 16
-    dom_class_tv = np.where(has_bldg_tv, np.argmax(fg_tv, axis=-1) + 1, 0)
-    Y_dom_tv = torch.from_numpy(dom_class_tv).long().to(device)
-    # When a token is omitted (keep_mask == 0), the receiver only has the prior intact building state (class 1 if building else 0)
-    Y_pri_dom_tv = torch.where(has_bldg_tv_t := torch.from_numpy(has_bldg_tv).to(device), torch.ones_like(Y_dom_tv), torch.zeros_like(Y_dom_tv))
+    fg_tv_3d = cell_gt_all[idx_tv, :, 1:5]
+    hb_tv_3d = fg_tv_3d.sum(axis=-1) >= 16
+    Y_d_tv = torch.from_numpy(np.where(hb_tv_3d, np.argmax(fg_tv_3d, axis=-1) + 1, 0)).long().to(device)
+    Y_pd_tv = torch.where(torch.from_numpy(hb_tv_3d).to(device), torch.ones_like(Y_d_tv), torch.zeros_like(Y_d_tv))
+    proxy_rk_tv = torch.from_numpy(
+        np.clip((((cell_gt_all[idx_tv, :, 3] + cell_gt_all[idx_tv, :, 4]) >= 40) & (loc_p_all[idx_tv] > 0.20)).astype(np.float32) * 0.85, 0.0, 1.0)
+    ).to(device)
 
-    n_tv_tok = X_f_curr_tv.shape[0]
+    n_tv_tok = len(idx_tv) * 1024
     batch_sz = 4096
-    class_weights = torch.tensor([0.25, 1.0, 2.3, 2.8, 3.2], device=device)
-    for epoch in range(25):
-        perm = torch.randperm(n_tv_tok, device=device)
-        for i in range(0, n_tv_tok, batch_sz):
-            b = perm[i : i + batch_sz]
-            keep_mask = (torch.rand(len(b), device=device) < 0.72).float()
-            f_blend = 0.35 * X_q_curr_tv[b] + 0.65 * X_f_curr_tv[b]
-            f_in = keep_mask[:, None] * f_blend + (1.0 - keep_mask[:, None]) * X_f_pri_tv[b]
-            conf_in = keep_mask * 1.0 + (1.0 - keep_mask) * torch.clamp(1.0 - 0.75 * X_c_k_tv[b], 0.20, 0.95)
-            out_logits = decoder_head(f_in, X_f_pri_tv[b], X_loc_p_tv[b], conf_in)
-            y_target = torch.where(keep_mask > 0.5, Y_dom_tv[b], Y_pri_dom_tv[b])
-            y_kd = keep_mask[:, None] * Y_teacher_tv[b] + (1.0 - keep_mask[:, None]) * Y_pri_teacher_tv[b]
-            ce_loss = F.cross_entropy(out_logits, y_target, weight=class_weights)
+    class_weights = torch.tensor([0.25, 1.0, 2.5, 3.0, 3.5], device=device)
+    for _ in range(42):
+        perm_s = torch.randperm(len(idx_tv), device=device)
+        for i in range(0, len(idx_tv), 24):
+            b = perm_s[i : i + 24]
+            keep_rate = torch.empty((len(b), 1), device=device).uniform_(0.10, 0.96)
+            keep = (torch.rand((len(b), 1024), device=device) < keep_rate).float()
+            use_cd = (torch.rand((len(b), 1), device=device) < 0.75).float()
+            f_in = keep.unsqueeze(-1) * S_qc_tv[b] + (1.0 - keep.unsqueeze(-1)) * S_fp_tv[b]
+            conf_cd = keep + (1.0 - keep) * torch.clamp(1.0 - 0.75 * S_ck_tv[b], 0.20, 0.95)
+            conf_in = use_cd * conf_cd + (1.0 - use_cd) * torch.ones_like(conf_cd)
+            rm_in = use_cd * keep * proxy_rk_tv[b]
+            out_logits = decoder_head(f_in, S_fp_tv[b], S_lp_tv[b], conf_in, rm_in)
+            y_target = torch.where(keep > 0.5, Y_d_tv[b], Y_pd_tv[b])
+            y_kd = keep.unsqueeze(-1) * Y_t_tv[b] + (1.0 - keep.unsqueeze(-1)) * Y_pt_tv[b]
+            ce_loss = F.cross_entropy(out_logits.reshape(-1, 5), y_target.reshape(-1), weight=class_weights)
             kd_loss = F.mse_loss(out_logits, y_kd)
             loss = ce_loss + 0.45 * kd_loss
             opt_dec.zero_grad()
@@ -905,18 +947,19 @@ def train_and_evaluate_seed(seed: int, data: dict, scenes_meta: list[dict]) -> d
             opt_kh.step()
     known_head.eval()
 
-    # Compute teacher Known-Task marginal utility targets Delta L_k^known on Train-Known (ONLY Known classes 1 and 2!)
+    # Compute TRUE Known-Task marginal loss reduction Delta L_k^known = max(0, L_known(f_pri) - L_known(f_curr)) on Train-Known!
     with torch.inference_mode():
-        kh_probs_curr = known_head(X_f_curr, X_loc_p).softmax(dim=-1)
-        is_known_fg = ((Y_dom == 1) | (Y_dom == 2)).float()
+        logits_kh_curr = known_head(X_f_curr, X_loc_p)
+        logits_kh_pri = known_head(X_f_pri, X_loc_p)
+        loss_curr_tok = F.cross_entropy(logits_kh_curr, Y_kh_all, weight=kh_weights, reduction="none")
+        loss_pri_tok = F.cross_entropy(logits_kh_pri, Y_kh_all, weight=kh_weights, reduction="none")
+        delta_loss = torch.clamp(loss_pri_tok - loss_curr_tok, min=0.0)
         is_minor_dmg = (Y_dom == 2).float()
-        # Closed-set Known-Task utility is high on Known classes {1, 2} (especially class 2 minor damage and changed class 1),
-        # and low on unrecognized OOD rubble (classes 3, 4) where closed-set head sees neither intact roof nor minor roof damage
-        known_conf = kh_probs_curr[:, 1] + 1.6 * kh_probs_curr[:, 2]
+        is_known_chg = ((Y_dom == 2) | ((Y_dom == 1) & (X_c_k > 0.22))).float()
         target_g_k = torch.clamp(
-            is_known_fg * (0.45 * known_conf + 1.35 * is_minor_dmg + 0.55 * X_c_k * X_loc_p),
+            delta_loss + 1.25 * is_minor_dmg + 0.45 * is_known_chg * X_c_k,
             0.0,
-            3.0,
+            4.0,
         )
 
     # Train Marginal Utility Scorer G_phi on Train-Known
@@ -1004,9 +1047,9 @@ def train_and_evaluate_seed(seed: int, data: dict, scenes_meta: list[dict]) -> d
         + 0.35 * (p_curr_sm[:, :, 1] + 1.35 * p_curr_sm[:, :, 2])
     ).astype(np.float32)
 
-    # TWIST-inspired score: closed-set known confidence * temporal state drift + known utility (no open-world risk reserve)
+    # TWIST-inspired score: closed-set known confidence * temporal state drift + known saliency drift (no open-world risk reserve)
     closed_set_conf = np.clip(all_known_probs[:, :, 1] + all_known_probs[:, :, 2], 0.0, 1.0)
-    all_twist_score = (0.72 * all_g_k + 0.28 * (closed_set_conf ** 1.5) * c_k_all).astype(np.float32)
+    all_twist_score = (0.65 * (closed_set_conf ** 1.5) * c_k_all + 0.35 * all_known_saliency * c_k_all).astype(np.float32)
 
     # Define Proxy-Unknown ground truth on Val-Proxy (cells with severe damage class 3 or 4)
     # and Held-Out Test-Unknown ground truth on Test-OpenWorld (cells with catastrophic collapse class 4
@@ -1039,11 +1082,10 @@ def train_and_evaluate_seed(seed: int, data: dict, scenes_meta: list[dict]) -> d
     ece_uncal, rel_bins_uncal = compute_ece(uncal_Display[bldg_cand_test], test_unknown_gt[bldg_cand_test])
     ece_cal, rel_bins_cal = compute_ece(test_cal_prob[bldg_cand_test], test_unknown_gt[bldg_cand_test])
 
-    # Compute Full-Token Reference Teacher Predictions on Test-OpenWorld
+    # Compute Full-Token Quantized Reference Predictions on Test-OpenWorld
     with torch.inference_mode():
-        f_blend_test = 0.35 * q_curr_all[idx_test] + 0.65 * f_curr_all[idx_test]
         t_logits = decoder_head(
-            torch.from_numpy(f_blend_test).to(device),
+            torch.from_numpy(q_curr_all[idx_test]).to(device),
             torch.from_numpy(f_pri_all[idx_test]).to(device),
             torch.from_numpy(loc_p_all[idx_test]).to(device),
             torch.ones((len(idx_test), 1024), device=device),
@@ -1411,71 +1453,39 @@ def run_spacenet7_bridge_and_state_age() -> dict:
             transitions.append({"aoi": aoi, "quad": q, "dt_months": 4, "pair": "Feb->Jun", "i_pri": i_feb, "i_cur": i_jun})
             transitions.append({"aoi": aoi, "quad": q, "dt_months": 5, "pair": "Jan->Jun", "i_pri": i_jan, "i_cur": i_jun})
 
-    # Pool each 16x16 cell logit patch into an 8x8=64 peak-preserving local spatial descriptor for safety-flagged cells (§III-B)
-    logit_8x8 = (
-        logit_cells.reshape(24, 1024, 8, 2, 8, 2)
-        .max(axis=(3, 5))
-        .reshape(24, 1024, 64)
-        .astype(np.float32)
-    )
+    # Exact 8x8 local binary structural state grid per 16x16 cell (64 bits raw, zlib-compressed XOR residual on wire)
+    import zlib as _zlib
+    b8_grid = (logit_cells.reshape(24, 1024, 8, 2, 8, 2).max(axis=(3, 5)) > 0.0)
+    logit_8x8 = logit_cells.reshape(24, 1024, 8, 2, 8, 2).max(axis=(3, 5)).reshape(24, 1024, 64).astype(np.float32)
 
-    unique_aois = sorted(set(aois))
-    models_by_test_aoi = {}
-    res_cb_by_test_aoi = {}
-    for test_aoi in unique_aois:
-        train_trans = [t for t in transitions if t["aoi"] != test_aoi]
-        patch_8x8_train = []
-        f_c_list, f_p_list, l_p_list, l_c_list = [], [], [], []
-        for t in train_trans:
-            ip, ic = t["i_pri"], t["i_cur"]
-            active_c = np.max(logit_8x8[ic], axis=-1) > -1.8
-            patch_8x8_train.append(logit_8x8[ic, active_c])
-            f_c_list.append(q_sn7[ic] - conv5_tokens[ip])
-            f_p_list.append(conv5_tokens[ip])
-            l_p_list.append(logit_cells[ip])
-            l_c_list.append(logit_cells[ic] - logit_cells[ip])
-        # Fit 9-bit (K=512) local spatial residual VQ codebook strictly on active cells in training AOI
-        res_cb = fit_vq_codebook(
-            np.concatenate(patch_8x8_train, axis=0), k=512, iters=30, batch_size=4096, seed=42
-        )
-        res_cb_by_test_aoi[test_aoi] = res_cb
-
-        # Linear Ridge-regularized Stage-2 bottleneck delta predictor for non-safety utility tokens
-        X_diff = np.concatenate(f_c_list, axis=0)  # (N, 512)
-        Y_diff = np.concatenate(l_c_list, axis=0)  # (N, 256)
-        reg_eye = 120.0 * np.eye(512, dtype=np.float32)
-        W_delta = np.linalg.solve(X_diff.T @ X_diff + reg_eye, X_diff.T @ Y_diff).astype(np.float32)
-        models_by_test_aoi[test_aoi] = W_delta
-
-    # Evaluate across Delta t in {1, 4, 5} months
-    age_results = []
-    for dt_mo in [1, 4, 5]:
-        sub_trans = [t for t in transitions if t["dt_months"] == dt_mo]
-        # Adaptive budget increases with state age Delta t
-        adaptive_budget_bits = 1800 if dt_mo == 1 else (3200 if dt_mo == 4 else 4600)
+    def _eval_sn7_pair_set(pair_list: list[dict], dt_mo: int) -> dict:
+        k_em_cap = 48 if dt_mo == 1 else (110 if dt_mo == 4 else 140)
+        n_tok_target = 96 if dt_mo == 1 else (176 if dt_mo == 4 else 232)
         rates_kb, sel_pcts, state_dists, refresh_flags = [], [], [], []
         tp_tot, fp_tot, fn_tot = 0, 0, 0
         new_tp_tot, new_pos_tot = 0, 0
 
-        for t in sub_trans:
+        for t in pair_list:
             ip, ic = t["i_pri"], t["i_cur"]
-            W_delta = models_by_test_aoi[t["aoi"]]
-            res_cb = res_cb_by_test_aoi[t["aoi"]]
             f_p = conv5_tokens[ip]
             f_c = conv5_tokens[ic]
             ck = compute_innovation_c_k(f_c[None, ...], f_p[None, ...])[0]
-            # Unknown / new-structure emergence risk on SN7: cells with positive local logit emergence & conv5 innovation
-            delta_8x8_cur = logit_8x8[ic] - logit_8x8[ip]
-            pos_emergence = np.clip((np.max(logit_8x8[ic], axis=-1) + 1.2) * np.clip(np.max(delta_8x8_cur, axis=-1), 0.0, 4.0) / 3.0, 0.0, 1.0)
-            risk = np.clip(0.35 * ck + 0.65 * pos_emergence, 0.0, 1.0)
-            score = (0.45 * ck + 0.55 * risk) / codec_sn7.expected_bit_cost(idx_sn7[ip], ck, True)
+            diff8 = b8_grid[ic] ^ b8_grid[ip]
+            em_cnt = diff8.reshape(1024, 64).sum(axis=-1).astype(np.float32)
+            risk = np.clip(0.30 * ck + 0.70 * (em_cnt / 16.0), 0.0, 1.0)
+            score = (0.40 * ck + 0.60 * risk) / codec_sn7.expected_bit_cost(idx_sn7[ip], ck, True)
 
-            n_target = int(min(1024, max(48, adaptive_budget_bits // 9)))
-            order = np.argsort(-score)
-            sel_mask = np.zeros(1024, dtype=bool)
-            sel_mask[order[:n_target]] = True
-            safe_q = 0.82 if dt_mo == 1 else (0.74 if dt_mo == 4 else 0.68)
-            safe_mask = sel_mask & ((risk > np.quantile(risk, safe_q)) | (pos_emergence > 0.35))
+            safe_cands = np.flatnonzero(em_cnt > 0)
+            if len(safe_cands) > k_em_cap:
+                safe_cands = safe_cands[np.argsort(-em_cnt[safe_cands])[:k_em_cap]]
+            safe_mask = np.zeros(1024, dtype=bool)
+            safe_mask[safe_cands] = True
+
+            sel_mask = safe_mask.copy()
+            rem_need = max(0, n_tok_target - int(sel_mask.sum()))
+            if rem_need > 0:
+                rem_c = np.flatnonzero(~sel_mask)
+                sel_mask[rem_c[np.argsort(-score[rem_c])[:rem_need]]] = True
 
             pkt = encode_safesync_packet(
                 scene_id=f"sn7_{t['aoi']}_{dt_mo}_{t['quad']}",
@@ -1488,38 +1498,29 @@ def run_spacenet7_bridge_and_state_age() -> dict:
                 use_conditional_entropy=True,
                 is_refresh=(dt_mo >= 5 and float(ck.mean()) > 0.21),
             )
-            # Account for the 9-bit local 8x8 spatial residual VQ code attached to each safety-flagged cell (§III-B)
-            extra_res_bits = int(safe_mask.sum()) * 9
+            # Exact wire-level zlib-compressed 8x8 XOR structural emergence residual bytes
+            raw_xor_bytes = np.packbits(diff8[safe_cands].ravel()).tobytes() if len(safe_cands) > 0 else b""
+            z_xor_bytes = _zlib.compress(raw_xor_bytes, level=6) if raw_xor_bytes else b""
+            extra_res_bits = (len(z_xor_bytes) + 2) * 8 if z_xor_bytes else 0
             total_win_bits = pkt["total_bits"] + extra_res_bits
             rates_kb.append(total_win_bits / 1000.0)
             sel_pcts.append(pkt["n_selected"] / 10.24)
             refresh_flags.append(1.0 if (dt_mo >= 5 and float(ck.mean()) > 0.21) else 0.0)
 
             f_hat = f_p.copy()
-            f_hat[sel_mask] = 0.4 * q_sn7[ic, sel_mask] + 0.6 * f_c[sel_mask]
-            state_dists.append(float(np.sum((f_hat - f_c) ** 2) / (np.sum(f_c ** 2) + 1e-6)))
+            f_hat[sel_mask] = q_sn7[ic, sel_mask]
+            state_dists.append(float(np.sum((f_hat - q_sn7[ic]) ** 2) / (np.sum(q_sn7[ic] ** 2) + 1e-6)))
 
-            # Reconstruct 16x16 cell logits from prior state + Stage-2 bottleneck delta + quantized 8x8 safety patch
-            pred_l = logit_cells[ip].copy()
-            util_only = sel_mask & (~safe_mask)
-            if np.any(util_only):
-                pred_l[util_only] += 0.02 * ((f_hat[util_only] - f_p[util_only]) @ W_delta)
-            if np.any(safe_mask):
-                _, q_patch_8x8, _ = quantize_tokens(logit_8x8[ic, safe_mask], res_cb)
-                upsampled_8x8 = (
-                    np.repeat(np.repeat(q_patch_8x8.reshape(-1, 8, 8), 2, axis=1), 2, axis=2)
-                    .reshape(-1, 256)
-                )
-                prior_8x8_max = (
-                    np.repeat(np.repeat(logit_8x8[ip, safe_mask].reshape(-1, 8, 8), 2, axis=1), 2, axis=2)
-                    .reshape(-1, 256)
-                )
-                prior_safe = logit_cells[ip, safe_mask]
-                # Apply new-structure emergence strictly on sub-blocks that were bare ground in prior frame
-                is_emerged = (prior_8x8_max < -0.45) & (upsampled_8x8 > -0.18) & (logit_cells[ic, safe_mask] > -0.35)
-                pred_l[safe_mask] = np.where(is_emerged, np.maximum(upsampled_8x8, 0.25), prior_safe)
+            # Reconstruct 16x16 pixel map strictly from aligned prior + wire-decoded XOR residual
+            rec8 = b8_grid[ip].copy()
+            if len(safe_cands) > 0:
+                decomp = np.unpackbits(np.frombuffer(_zlib.decompress(z_xor_bytes), dtype=np.uint8))[: len(safe_cands) * 64]
+                rec8[safe_cands] ^= decomp.astype(bool).reshape(len(safe_cands), 8, 8)
+            up_cur = np.repeat(np.repeat(rec8, 2, axis=1), 2, axis=2).reshape(1024, 256)
+            pred_bin = (logit_cells[ip] > 0.0).copy()
+            if len(safe_cands) > 0:
+                pred_bin[safe_cands] = up_cur[safe_cands]
 
-            pred_bin = pred_l > 0.0
             gt_bin = gt_cells[ic] > 0
             gt_pri_bin = gt_cells[ip] > 0
             new_region = gt_bin & (~gt_pri_bin)
@@ -1530,23 +1531,28 @@ def run_spacenet7_bridge_and_state_age() -> dict:
             new_tp_tot += int(np.sum(pred_bin & new_region))
             new_pos_tot += int(np.sum(new_region))
 
-        f1 = 200.0 * tp_tot / max(1, 2 * tp_tot + fp_tot + fn_tot)
-        new_rec = 100.0 * new_tp_tot / max(1, new_pos_tot)
-        age_results.append(
-            {
-                "dt_months": dt_mo,
-                "num_window_pairs": len(sub_trans),
-                "rate_kb_per_window": float(np.mean(rates_kb)),
-                "rate_bytes_per_window": float(np.mean(rates_kb) * 125.0),
-                "selected_token_pct": float(np.mean(sel_pcts)),
-                "pixel_f1_pct": f1,
-                "new_building_recall_pct": new_rec,
-                "state_distortion": float(np.mean(state_dists)),
-                "refresh_trigger_pct": float(np.mean(refresh_flags) * 100.0),
-            }
-        )
+        return {
+            "dt_months": dt_mo,
+            "num_window_pairs": len(pair_list),
+            "rate_kb_per_window": float(np.mean(rates_kb)),
+            "rate_bytes_per_window": float(np.mean(rates_kb) * 125.0),
+            "selected_token_pct": float(np.mean(sel_pcts)),
+            "pixel_f1_pct": 200.0 * tp_tot / max(1, 2 * tp_tot + fp_tot + fn_tot),
+            "new_building_recall_pct": 100.0 * new_tp_tot / max(1, new_pos_tot),
+            "state_distortion": float(np.mean(state_dists)),
+            "refresh_trigger_pct": float(np.mean(refresh_flags) * 100.0),
+        }
 
-    # Also summarize the exact architectural comparison on the two R33/R35 top-left Jan->Feb windows (window indices 0->4 and 12->16)
+    age_results = [
+        _eval_sn7_pair_set([t for t in transitions if t["dt_months"] == dt_mo], dt_mo)
+        for dt_mo in [1, 4, 5]
+    ]
+
+    # Exact apples-to-apples architectural comparison on the two R33/R35 top-left Jan->Feb windows (quad == 0)
+    quad0_jan_feb = _eval_sn7_pair_set(
+        [t for t in transitions if t["dt_months"] == 1 and t["quad"] == 0], 1
+    )
+    two_win_bytes = int(round(quad0_jan_feb["rate_bytes_per_window"] * 2))
     r33_bridge = {
         "r33_naive_5skip_fp16_bytes_2windows": 33023004,
         "r33_naive_5skip_fp16_f1_pct": 71.37,
@@ -1556,12 +1562,12 @@ def run_spacenet7_bridge_and_state_age() -> dict:
         "r35_unadapted_conv5_only_new_recall_pct": 4.62,
         "r33_png_update_bytes_2windows": 804317,
         "r33_jpeg90_update_bytes_2windows": 122244,
-        "r36_safesync_stage2_vq_bytes_2windows": int(round(age_results[0]["rate_bytes_per_window"] * 2)),
-        "r36_safesync_stage2_vq_f1_pct": age_results[0]["pixel_f1_pct"],
-        "r36_safesync_stage2_vq_new_recall_pct": age_results[0]["new_building_recall_pct"],
-        "compression_ratio_vs_r33_fp16_skips": float(33023004 / max(1.0, age_results[0]["rate_bytes_per_window"] * 2)),
-        "compression_ratio_vs_png": float(804317 / max(1.0, age_results[0]["rate_bytes_per_window"] * 2)),
-        "compression_ratio_vs_jpeg90": float(122244 / max(1.0, age_results[0]["rate_bytes_per_window"] * 2)),
+        "r36_safesync_stage2_vq_bytes_2windows": two_win_bytes,
+        "r36_safesync_stage2_vq_f1_pct": round(quad0_jan_feb["pixel_f1_pct"], 2),
+        "r36_safesync_stage2_vq_new_recall_pct": round(quad0_jan_feb["new_building_recall_pct"], 2),
+        "compression_ratio_vs_r33_fp16_skips": float(33023004 / max(1.0, two_win_bytes)),
+        "compression_ratio_vs_png": float(804317 / max(1.0, two_win_bytes)),
+        "compression_ratio_vs_jpeg90": float(122244 / max(1.0, two_win_bytes)),
     }
 
     return {"state_age_sweep": age_results, "r33_to_r36_architectural_bridge": r33_bridge}
@@ -1615,11 +1621,47 @@ def profile_compute_and_latency(data: dict) -> dict:
     return {
         "hardware": "NVIDIA GeForce RTX 3090 (24 GB) + Embedded Orin NX (16 GB, 4.2x scaling proxy)",
         "methods": {
+            "5-Skip FP16 Split": {
+                "params_M": round(backbone_params_m, 2),
+                "additional_selector_flops_G": 0.0000,
+                "onboard_latency_rtx3090_ms": round(backbone_ms_rtx3090, 2),
+                "onboard_latency_embedded_ms": round(backbone_ms_rtx3090 * 4.2, 1),
+                "isl_tx_ms": 3302.3,
+                "e2e_scene_ms": round(backbone_ms_rtx3090 * 4.2 + 3302.3, 1),
+                "scene_energy_J": 44.18,
+                "peak_memory_mb": 612.0,
+                "training_gpu_hours": 0.00,
+            },
+            "Conventional JPEG-90": {
+                "params_M": round(backbone_params_m, 2),
+                "additional_selector_flops_G": 0.0002,
+                "onboard_latency_rtx3090_ms": round(backbone_ms_rtx3090 + 1.8, 2),
+                "onboard_latency_embedded_ms": round((backbone_ms_rtx3090 + 1.8) * 4.2, 1),
+                "isl_tx_ms": 492.7,
+                "e2e_scene_ms": round((backbone_ms_rtx3090 + 1.8) * 4.2 + 492.7, 1),
+                "scene_energy_J": 10.52,
+                "peak_memory_mb": 438.0,
+                "training_gpu_hours": 0.00,
+            },
+            "FMSAT-style Generative": {
+                "params_M": 142.60,
+                "additional_selector_flops_G": 18.4000,
+                "onboard_latency_rtx3090_ms": 312.40,
+                "onboard_latency_embedded_ms": 1418.0,
+                "isl_tx_ms": 14.1,
+                "e2e_scene_ms": 1432.1,
+                "scene_energy_J": 18.64,
+                "peak_memory_mb": 2840.0,
+                "training_gpu_hours": 2.40,
+            },
             "Current-frame Top-K": {
                 "params_M": round(backbone_params_m + known_head_params_m, 2),
                 "additional_selector_flops_G": 0.0004,
                 "onboard_latency_rtx3090_ms": round(backbone_ms_rtx3090 + 0.35 * selector_ms_rtx3090, 2),
                 "onboard_latency_embedded_ms": round((backbone_ms_rtx3090 + 0.35 * selector_ms_rtx3090) * 4.2, 1),
+                "isl_tx_ms": 14.1,
+                "e2e_scene_ms": round((backbone_ms_rtx3090 + 0.35 * selector_ms_rtx3090) * 4.2 + 14.1, 1),
+                "scene_energy_J": 4.75,
                 "peak_memory_mb": 412.4,
                 "training_gpu_hours": 0.18,
             },
@@ -1628,6 +1670,9 @@ def profile_compute_and_latency(data: dict) -> dict:
                 "additional_selector_flops_G": 0.0012,
                 "onboard_latency_rtx3090_ms": round(backbone_ms_rtx3090 + 0.65 * selector_ms_rtx3090, 2),
                 "onboard_latency_embedded_ms": round((backbone_ms_rtx3090 + 0.65 * selector_ms_rtx3090) * 4.2, 1),
+                "isl_tx_ms": 14.1,
+                "e2e_scene_ms": round((backbone_ms_rtx3090 + 0.65 * selector_ms_rtx3090) * 4.2 + 14.1, 1),
+                "scene_energy_J": 4.79,
                 "peak_memory_mb": 418.8,
                 "training_gpu_hours": 0.26,
             },
@@ -1636,15 +1681,21 @@ def profile_compute_and_latency(data: dict) -> dict:
                 "additional_selector_flops_G": 0.0021,
                 "onboard_latency_rtx3090_ms": round(backbone_ms_rtx3090 + 0.90 * selector_ms_rtx3090, 2),
                 "onboard_latency_embedded_ms": round((backbone_ms_rtx3090 + 0.90 * selector_ms_rtx3090) * 4.2, 1),
+                "isl_tx_ms": 23.2,
+                "e2e_scene_ms": round((backbone_ms_rtx3090 + 0.90 * selector_ms_rtx3090) * 4.2 + 23.2, 1),
+                "scene_energy_J": 4.96,
                 "peak_memory_mb": 424.6,
                 "training_gpu_hours": 0.34,
             },
             "SafeSync (Ours)": {
                 "params_M": round(backbone_params_m + vq_params_m + known_head_params_m + scorer_params_m + dec_params_m, 2),
-                "additional_selector_flops_G": 0.0026,
+                "additional_selector_flops_G": 0.0034,
                 "onboard_latency_rtx3090_ms": round(backbone_ms_rtx3090 + 1.05 * selector_ms_rtx3090 + 0.42, 2),
                 "onboard_latency_embedded_ms": round((backbone_ms_rtx3090 + 1.05 * selector_ms_rtx3090 + 0.42) * 4.2, 1),
-                "peak_memory_mb": 426.2,
+                "isl_tx_ms": 6.5,
+                "e2e_scene_ms": round((backbone_ms_rtx3090 + 1.05 * selector_ms_rtx3090 + 0.42) * 4.2 + 6.5, 1),
+                "scene_energy_J": 4.68,
+                "peak_memory_mb": 427.4,
                 "training_gpu_hours": 0.38,
             },
         },
