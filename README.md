@@ -64,7 +64,7 @@ At matched application-layer budget $B_t = 2{,}600\text{ bits}$ (`2.59 kb/frame`
 
 | Method | Protocol | Wire Rate (kb/frame) ↓ | Known-Task F1 (%) ↑ | All-Class Sync-F1 (%) ↑ | Unknown Catastrophe Miss (%) ↓ |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Full feature (uncompressed VQ ref) | 3-Seed | 9.34 ± 0.00 | 75.89 ± 0.73 | 75.22 ± 0.39 | 0.00 ± 0.00 |
+| *Full feature (Uncompressed VQ Upper Bound, 3.6× rate)* | *3-Seed (Ref)* | *9.34 ± 0.00* | *75.89 ± 0.73* | *75.22 ± 0.39* | *0.00 ± 0.00* |
 | Current-frame Top-$K$ | 3-Seed | 2.61 ± 0.00 | 46.50 ± 0.50 | 39.83 ± 0.28 | 71.31 ± 1.02 |
 | STARS-style adapted [10] | 3-Seed | 2.60 ± 0.00 | 54.21 ± 0.43 | 47.43 ± 0.22 | 62.38 ± 0.89 |
 | Stateful utility-only (w/o $S_{\mathrm{safe}}$) | 3-Seed | 2.61 ± 0.00 | 69.39 ± 0.48 | 61.49 ± 0.60 | 44.70 ± 2.23 |
