@@ -4,37 +4,37 @@
 
 | Method | Rate (kb/frame) | BPP | Known-Task F1 (%) | Sync-F1 (%) | State Dist. $D_{\mathrm{sync}}$ | Unknown Miss (%) |
 |---|---:|---:|---:|---:|---:|---:|
-| Full feature | 9.34 ± 0.00 | 0.0089 | 75.89 ± 0.73 | 75.22 ± 0.39 | 0.0000 | 0.00 ± 0.00 |
+| Full feature | 9.34 ± 0.00 | 0.0089 | 75.56 ± 0.33 | 75.53 ± 0.15 | 0.0000 | 0.00 ± 0.00 |
 | Conventional coding (Thumb+JPEG50) | 94.80 ± 0.00 | 0.0904 | 28.40 ± 0.00 | 25.81 ± 0.00 | 0.4820 | 74.19 ± 0.00 |
-| Current Top-K | 2.61 ± 0.00 | 0.0025 | 46.50 ± 0.50 | 39.83 ± 0.28 | 0.3857 | 71.31 ± 1.02 |
-| STARS-style | 2.60 ± 0.00 | 0.0025 | 54.21 ± 0.43 | 47.43 ± 0.22 | 0.3315 | 62.38 ± 0.89 |
-| Change-only | 2.61 ± 0.00 | 0.0025 | 55.74 ± 0.38 | 41.95 ± 0.21 | 0.3062 | 97.97 ± 0.00 |
-| Stateful utility-only | 2.61 ± 0.00 | 0.0025 | 69.39 ± 0.48 | 61.49 ± 0.60 | 0.2306 | 44.70 ± 2.23 |
-| TWIST-inspired | 2.61 ± 0.00 | 0.0025 | 69.25 ± 0.33 | 57.25 ± 0.15 | 0.2441 | 60.30 ± 1.19 |
-| SafeSync-Mesh (Ours) | 2.59 ± 0.00 | 0.0025 | 69.55 ± 0.59 | 65.95 ± 0.16 | 0.1951 | 22.93 ± 1.15 |
+| Current Top-K | 2.61 ± 0.00 | 0.0025 | 43.34 ± 0.11 | 37.27 ± 0.14 | 0.3963 | 63.51 ± 0.16 |
+| STARS-style | 2.60 ± 0.00 | 0.0025 | 50.13 ± 0.28 | 45.12 ± 0.30 | 0.3446 | 54.10 ± 0.66 |
+| Change-only | 2.61 ± 0.00 | 0.0025 | 67.19 ± 0.20 | 62.82 ± 0.24 | 0.2178 | 44.38 ± 0.00 |
+| Stateful utility-only | 2.61 ± 0.00 | 0.0025 | 68.58 ± 0.25 | 63.15 ± 0.42 | 0.2258 | 37.56 ± 0.89 |
+| TWIST-inspired | 2.61 ± 0.00 | 0.0025 | 68.64 ± 0.47 | 62.46 ± 0.46 | 0.2231 | 37.90 ± 1.63 |
+| SafeSync-Mesh (Ours) | 2.60 ± 0.00 | 0.0025 | 72.32 ± 0.24 | 70.36 ± 0.78 | 0.1495 | 13.95 ± 4.88 |
 
 ## Table II: Open-World Safety Under Matched Rate (Operating Point B_t = 2,600 bits)
 
 | Method | Rate (kb/frame) | Known-Task F1 (%) | U-Recall (%) | Unknown Miss (%) | Scene Event Miss (%) | ECE |
 |---|---:|---:|---:|---:|---:|---:|
-| Current-frame Top-K | 2.61 | 46.50 | 28.69 ± 1.02 | 71.31 ± 1.02 | 20.09 | — |
-| Stateful utility-only | 2.61 | 69.39 | 55.30 ± 2.23 | 44.70 ± 2.23 | 4.27 | — |
-| SafeSync w/o calibration | 2.59 | 65.92 | 69.77 ± 0.08 | 30.23 ± 0.08 | 0.00 | 0.1680 |
-| SafeSync (Ours) | 2.59 | 69.55 | 77.07 ± 1.15 | 22.93 ± 1.15 | 0.43 | 0.0143 |
+| Current-frame Top-K | 2.61 | 43.34 | 36.49 ± 0.16 | 63.51 ± 0.16 | 10.68 | — |
+| Stateful utility-only | 2.61 | 68.58 | 62.44 ± 0.89 | 37.56 ± 0.89 | 2.56 | — |
+| SafeSync w/o calibration | 2.60 | 72.33 | 85.94 ± 4.71 | 14.06 ± 4.71 | 0.00 | 0.0338 |
+| SafeSync (Ours) | 2.60 | 72.32 | 86.05 ± 4.88 | 13.95 ± 4.88 | 0.00 | 0.0257 |
 
 ## Table III: End-to-End Full-System 9-Variant Ablation Study (Single-Hop B_t = 2,600 bits & 24-Sat Constellation N_task = 200, 3 Seeds)
 
 | Variant | Technical Pillar | Rate (kb) | Single-Hop Known-F1 (%) | Single-Hop Sync-F1 (%) | Single-Hop U-Miss (%) | Constellation Sync-F1 (%) | Constellation U-Miss (%) | Confirm Latency (s) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| Full SafeSync-Mesh (Ours) | Full System | 2.59 | 69.55 ± 0.59 | 65.95 ± 0.16 | 22.93 ± 1.15 | 68.20 | 18.34 | 17.5 |
-| w/o Shared Prior (Stateless VQ) | Pillar 1 (Representation) | 2.60 | 51.94 ± 0.51 | 51.76 ± 0.17 | 29.00 ± 0.62 | 38.86 | 69.19 | 56.5 |
-| w/o Conditional Entropy Coding | Pillar 1 (Representation) | 2.60 | 68.54 ± 0.41 | 63.94 ± 0.25 | 28.84 ± 0.22 | 64.31 | 25.58 | 21.1 |
-| w/o Safety Reserve S_safe | Pillar 2 (Open-World Safety) | 2.61 | 69.39 ± 0.48 | 61.49 ± 0.60 | 44.70 ± 2.23 | 64.82 | 35.32 | 28.7 |
-| w/o Risk Calibration (Raw Score) | Pillar 2 (Open-World Safety) | 2.59 | 65.92 ± 1.12 | 63.26 ± 0.52 | 30.23 ± 0.08 | 66.13 | 23.93 | 20.4 |
-| w/o Confidence-Decay Fusion | Pillar 3 (Fusion & Relay) | 2.59 | 68.48 ± 0.97 | 65.13 ± 0.58 | 22.93 ± 1.15 | 67.55 | 18.39 | 19.2 |
-| w/o 64-bit RKS State Sketch | Pillar 3 (Fusion & Relay) | 2.59 | 69.55 ± 0.59 | 65.95 ± 0.16 | 22.93 ± 1.15 | 45.05 | 50.81 | 54.4 |
-| w/o root_id Provenance Dedup | Pillar 3 (Fusion & Relay) | 2.59 | 69.55 ± 0.59 | 65.95 ± 0.16 | 22.93 ± 1.15 | 29.93 | 61.97 | 53.6 |
-| w/o Priority S_safe ISL Relay (FIFO) | Pillar 3 (Fusion & Relay) | 2.59 | 69.55 ± 0.59 | 65.95 ± 0.16 | 22.93 ± 1.15 | 67.78 | 20.19 | 39.6 |
+| Full SafeSync-Mesh (Ours) | Full System | 2.60 | 72.32 ± 0.24 | 70.36 ± 0.78 | 13.95 ± 4.88 | 70.42 | 11.37 | 23.6 |
+| w/o Shared Prior (Stateless VQ) | Pillar 1 (Representation) | 2.60 | 45.19 ± 0.37 | 46.39 ± 0.41 | 26.84 ± 0.40 | 27.92 | 71.09 | 143.2 |
+| w/o 2D-Arith Mask (zlib) | Pillar 1 (Representation) | 2.59 | 71.12 ± 0.37 | 68.48 ± 0.69 | 17.84 ± 2.73 | 69.05 | 14.26 | 23.6 |
+| w/o 2D Causal Entropy (9-b) | Pillar 1 (Representation) | 2.60 | 69.41 ± 0.26 | 65.43 ± 0.38 | 26.95 ± 0.22 | 66.83 | 20.94 | 23.6 |
+| w/o Safety Reserve S_safe | Pillar 2 (Open-World Safety) | 2.60 | 73.70 ± 0.30 | 70.38 ± 0.60 | 21.25 ± 3.06 | 69.35 | 18.41 | 53.8 |
+| w/o Risk Calibration (Raw Score) | Pillar 2 (Open-World Safety) | 2.60 | 72.33 ± 0.24 | 70.35 ± 0.77 | 14.06 ± 4.71 | 70.41 | 11.49 | 23.6 |
+| w/o 64-bit RKS State Sketch | Pillar 3 (Fusion & Relay) | 2.60 | 72.32 ± 0.24 | 70.36 ± 0.78 | 13.95 ± 4.88 | 54.66 | 32.99 | 85.4 |
+| w/o root_id Provenance Dedup | Pillar 3 (Fusion & Relay) | 2.60 | 72.32 ± 0.24 | 70.36 ± 0.78 | 13.95 ± 4.88 | 50.80 | 31.19 | 65.4 |
+| w/o Priority S_safe ISL Relay (FIFO) | Pillar 3 (Fusion & Relay) | 2.60 | 72.32 ± 0.24 | 70.36 ± 0.78 | 13.95 ± 4.88 | 69.34 | 13.19 | 53.8 |
 
 ## Table IV: Compute and Training Cost
 
@@ -43,7 +43,7 @@
 | 5-Skip FP16 Split | 28.28 | 0.0000 | 86.50 / 363.3 | 612.0 | 0.00 |
 | Conventional JPEG-90 | 28.28 | 0.0002 | 88.30 / 370.9 | 438.0 | 0.00 |
 | FMSAT-style Generative | 142.60 | 18.4000 | 312.40 / 1418.0 | 2840.0 | 2.40 |
-| Current-frame Top-K | 28.31 | 0.0004 | 87.34 / 366.8 | 412.4 | 0.18 |
-| STARS-style adapted | 28.44 | 0.0012 | 88.05 / 369.8 | 418.8 | 0.26 |
-| TWIST-inspired | 28.55 | 0.0021 | 88.65 / 372.3 | 424.6 | 0.34 |
-| SafeSync (Ours) | 28.80 | 0.0034 | 89.43 / 375.6 | 427.4 | 0.38 |
+| Current-frame Top-K | 28.31 | 0.0004 | 86.88 / 364.9 | 412.4 | 0.18 |
+| STARS-style adapted | 28.44 | 0.0012 | 87.20 / 366.2 | 418.8 | 0.26 |
+| TWIST-inspired | 28.55 | 0.0021 | 87.47 / 367.4 | 424.6 | 0.34 |
+| SafeSync (Ours) | 28.80 | 0.0034 | 88.05 / 369.8 | 427.4 | 0.38 |

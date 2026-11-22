@@ -44,6 +44,34 @@ def verify_wire_protocol_and_idempotence() -> None:
     safety_mask[changed_locs[:36]] = True
     calibrated_risk = rng.uniform(0.01, 0.75, size=1024).astype(np.float32)
 
+    for use_2d_arith in [True, False]:
+        for use_range in [False, True]:
+            for inc_risk in [False, True]:
+                p_test = encode_safesync_packet(
+                    scene_id="palu-tsunami_00000181",
+                    prior_indices=prior_indices,
+                    target_indices=target_indices,
+                    selected_mask=selected_mask,
+                    safety_mask=safety_mask,
+                    calibrated_risk=calibrated_risk,
+                    codec=codec,
+                    use_conditional_entropy=True,
+                    use_2d_arith_mask=use_2d_arith,
+                    use_range_ranks=use_range,
+                    include_risk_bins=inc_risk,
+                )
+                d_test = decode_safesync_packet(
+                    p_test["packet"],
+                    scene_id="palu-tsunami_00000181",
+                    prior_indices=prior_indices,
+                    codec=codec,
+                )
+                assert np.array_equal(d_test["reconstructed_indices"][selected_mask], target_indices[selected_mask])
+                assert np.array_equal(d_test["safety_mask"], safety_mask)
+                assert p_test["total_bits"] == (
+                    p_test["header_bits"] + p_test["mask_bits"] + p_test["safety_meta_bits"] + p_test["token_payload_bits"]
+                )
+
     pkt = encode_safesync_packet(
         scene_id="palu-tsunami_00000181",
         prior_indices=prior_indices,
@@ -53,6 +81,9 @@ def verify_wire_protocol_and_idempotence() -> None:
         calibrated_risk=calibrated_risk,
         codec=codec,
         use_conditional_entropy=True,
+        use_2d_arith_mask=True,
+        use_range_ranks=False,
+        include_risk_bins=False,
     )
     raw_bytes = pkt["packet"]
     dec = decode_safesync_packet(
@@ -126,7 +157,7 @@ def verify_published_tables() -> None:
     cv_ss = cv["summary_5fold"]["safesync"]
 
     print(
-        f"[PASS] 3-Seed Open-World (2.59 kb/frame): Known-F1={ss['known_f1']:.2f}%, "
+        f"[PASS] 3-Seed Open-World ({ss['rate_kb_per_frame']:.2f} kb/frame): Known-F1={ss['known_f1']:.2f}%, "
         f"Sync-F1={ss['sync_f1']:.2f}%, U-Miss={ss['u_miss']:.2f}%"
     )
     print(

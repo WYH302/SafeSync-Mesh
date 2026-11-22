@@ -31,6 +31,7 @@ from safesync.run_safesync_experiments import (  # noqa: E402
     MarginalUtilityScorer,
     OpenWorldRiskScorer,
     Stage2BottleneckHead,
+    _train_risk_scorer_subset,
     build_risk_extra_features,
     compute_ece,
     compute_innovation_c_k,
@@ -124,6 +125,7 @@ def run_single_fold(
     # 2. Train 2D Spatial Stage-2 Bottleneck Decoder Head T_psi strictly on wire-quantized q_curr_all + f_pri_all on Train + Val
     decoder_head = Stage2BottleneckHead(d=256, hidden=192, n_classes=5).to(device)
     opt_dec = torch.optim.AdamW(decoder_head.parameters(), lr=2.5e-3, weight_decay=1e-4)
+    sched_dec = torch.optim.lr_scheduler.CosineAnnealingLR(opt_dec, T_max=50)
 
     idx_tv = np.concatenate([idx_train, idx_val])
     S_qc_tv = torch.from_numpy(q_curr_all[idx_tv]).to(device)
@@ -133,56 +135,50 @@ def run_single_fold(
     Y_t_tv = torch.from_numpy(logits_curr_all[idx_tv]).to(device)
     Y_pt_tv = torch.from_numpy(logits_pri_all[idx_tv]).to(device)
 
-    X_f_curr_tv = torch.from_numpy(f_curr_all[idx_tv].reshape(-1, 256)).to(device)
-    X_f_pri_tv = torch.from_numpy(f_pri_all[idx_tv].reshape(-1, 256)).to(device)
-    Y_teacher_tv = torch.from_numpy(logits_curr_all[idx_tv].reshape(-1, 5)).to(device)
-    Y_pri_teacher_tv = torch.from_numpy(logits_pri_all[idx_tv].reshape(-1, 5)).to(device)
-
     fg_tv_3d = cell_gt_all[idx_tv, :, 1:5]
     hb_tv_3d = fg_tv_3d.sum(axis=-1) >= 16
     Y_d_tv = torch.from_numpy(np.where(hb_tv_3d, np.argmax(fg_tv_3d, axis=-1) + 1, 0)).long().to(device)
     Y_pd_tv = torch.where(torch.from_numpy(hb_tv_3d).to(device), torch.ones_like(Y_d_tv), torch.zeros_like(Y_d_tv))
-    proxy_rk_tv = torch.from_numpy(
-        np.clip((((cell_gt_all[idx_tv, :, 3] + cell_gt_all[idx_tv, :, 4]) >= 40) & (loc_p_all[idx_tv] > 0.20)).astype(np.float32) * 0.85, 0.0, 1.0)
-    ).to(device)
 
     batch_sz = 4096
-    n_tv_tok = X_f_curr_tv.shape[0]
-    class_weights = torch.tensor([0.25, 1.0, 2.5, 3.0, 3.5], device=device)
-    for _ in range(40):
+    class_weights = torch.tensor([0.25, 1.0, 2.5, 3.2, 4.0], device=device)
+    for _ in range(50):
         perm_s = torch.randperm(len(idx_tv), device=device)
         for i in range(0, len(idx_tv), 24):
             b = perm_s[i : i + 24]
             keep_rate = torch.empty((len(b), 1), device=device).uniform_(0.10, 0.96)
             keep = (torch.rand((len(b), 1024), device=device) < keep_rate).float()
-            use_cd = (torch.rand((len(b), 1), device=device) < 0.75).float()
-            f_in = keep.unsqueeze(-1) * S_qc_tv[b] + (1.0 - keep.unsqueeze(-1)) * S_fp_tv[b]
+            is_sl = (torch.rand((len(b), 1), device=device) < 0.15).float()
+            bg_b = S_fp_tv[b].mean(dim=1, keepdim=True).expand_as(S_fp_tv[b])
+            fp_in = (1.0 - is_sl.unsqueeze(-1)) * S_fp_tv[b] + is_sl.unsqueeze(-1) * bg_b
+            lp_in = (1.0 - is_sl) * S_lp_tv[b] + is_sl * (keep * S_lp_tv[b])
+            f_in = keep.unsqueeze(-1) * S_qc_tv[b] + (1.0 - keep.unsqueeze(-1)) * fp_in
             conf_cd = keep + (1.0 - keep) * torch.clamp(1.0 - 0.75 * S_ck_tv[b], 0.20, 0.95)
-            conf_in = use_cd * conf_cd + (1.0 - use_cd) * torch.ones_like(conf_cd)
-            rm_in = use_cd * keep * proxy_rk_tv[b]
-            out_logits = decoder_head(f_in, S_fp_tv[b], S_lp_tv[b], conf_in, rm_in)
-            y_target = torch.where(keep > 0.5, Y_d_tv[b], Y_pd_tv[b])
-            y_kd = keep.unsqueeze(-1) * Y_t_tv[b] + (1.0 - keep.unsqueeze(-1)) * Y_pt_tv[b]
-            loss = F.cross_entropy(out_logits.reshape(-1, 5), y_target.reshape(-1), weight=class_weights) + 0.45 * F.mse_loss(out_logits, y_kd)
+            conf_sl = keep + (1.0 - keep) * 0.15
+            conf_in = (1.0 - is_sl) * conf_cd + is_sl * conf_sl
+            out_logits = decoder_head(f_in, fp_in, lp_in, conf_in)
+            y_target = torch.where((keep > 0.5) | (is_sl < 0.5), torch.where(keep > 0.5, Y_d_tv[b], Y_pd_tv[b]), torch.zeros_like(Y_d_tv[b]))
+            y_kd = keep.unsqueeze(-1) * Y_t_tv[b] + (1.0 - keep.unsqueeze(-1)) * (1.0 - is_sl.unsqueeze(-1)) * Y_pt_tv[b]
+            loss = F.cross_entropy(out_logits.reshape(-1, 5), y_target.reshape(-1), weight=class_weights) + 0.40 * F.mse_loss(out_logits, y_kd)
             opt_dec.zero_grad()
             loss.backward()
             opt_dec.step()
+        sched_dec.step()
     decoder_head.eval()
 
-    # 3. Train ClosedSetKnownHead (ONLY classes {0, 1, 2}) and MarginalUtilityScorer on Train-Known
-    X_f_curr = torch.from_numpy(f_curr_all[idx_train].reshape(-1, 256)).to(device)
-    X_f_pri = torch.from_numpy(f_pri_all[idx_train].reshape(-1, 256)).to(device)
-    X_loc_p = torch.from_numpy(loc_p_all[idx_train].reshape(-1)).to(device)
-    X_c_k = torch.from_numpy(c_k_all[idx_train].reshape(-1)).to(device)
+    # 3. Train STRICT ClosedSetKnownHead & MarginalUtilityScorer ONLY on routine classes {0, 1, 2}
     fg_train = cell_gt_all[idx_train, :, 1:5].reshape(-1, 4)
     has_bldg_train = fg_train.sum(axis=-1) >= 16
     dom_class_train = np.where(has_bldg_train, np.argmax(fg_train, axis=-1) + 1, 0)
-    Y_dom = torch.from_numpy(dom_class_train).long().to(device)
+    known_mask = dom_class_train <= 2
+    X_f_curr = torch.from_numpy(f_curr_all[idx_train].reshape(-1, 256)[known_mask]).to(device)
+    X_f_pri = torch.from_numpy(f_pri_all[idx_train].reshape(-1, 256)[known_mask]).to(device)
+    X_loc_p = torch.from_numpy(loc_p_all[idx_train].reshape(-1)[known_mask]).to(device)
+    Y_kh_all = torch.from_numpy(dom_class_train[known_mask]).long().to(device)
     n_train_tok = X_f_curr.shape[0]
 
     known_head = ClosedSetKnownHead(d=256, hidden=128).to(device)
     opt_kh = torch.optim.AdamW(known_head.parameters(), lr=2.5e-3, weight_decay=1e-4)
-    Y_kh_all = torch.where(Y_dom <= 2, Y_dom, torch.zeros_like(Y_dom))
     kh_weights = torch.tensor([0.35, 1.1, 2.6], device=device)
     for _ in range(20):
         perm = torch.randperm(n_train_tok, device=device)
@@ -195,32 +191,23 @@ def run_single_fold(
     known_head.eval()
 
     with torch.inference_mode():
-        logits_kh_curr = known_head(X_f_curr, X_loc_p)
-        logits_kh_pri = known_head(X_f_pri, X_loc_p)
-        loss_curr_tok = F.cross_entropy(logits_kh_curr, Y_kh_all, weight=kh_weights, reduction="none")
-        loss_pri_tok = F.cross_entropy(logits_kh_pri, Y_kh_all, weight=kh_weights, reduction="none")
-        delta_loss = torch.clamp(loss_pri_tok - loss_curr_tok, min=0.0)
-        is_minor_dmg = (Y_dom == 2).float()
-        is_known_chg = ((Y_dom == 2) | ((Y_dom == 1) & (X_c_k > 0.22))).float()
-        target_g_k = torch.clamp(
-            delta_loss + 1.25 * is_minor_dmg + 0.45 * is_known_chg * X_c_k,
-            0.0,
-            4.0,
-        )
+        loss_curr_tok = F.cross_entropy(known_head(X_f_curr, X_loc_p), Y_kh_all, weight=kh_weights, reduction="none")
+        loss_pri_tok = F.cross_entropy(known_head(X_f_pri, X_loc_p), Y_kh_all, weight=kh_weights, reduction="none")
+        target_g_k = torch.clamp(loss_pri_tok - loss_curr_tok, min=0.0, max=4.0)
 
     utility_scorer = MarginalUtilityScorer(d=256, hidden=128).to(device)
     opt_ug = torch.optim.AdamW(utility_scorer.parameters(), lr=2.5e-3, weight_decay=1e-4)
+    zeros_ck_tr = torch.zeros(n_train_tok, device=device)
     for _ in range(22):
         perm = torch.randperm(n_train_tok, device=device)
         for i in range(0, n_train_tok, batch_sz):
             b = perm[i : i + batch_sz]
-            loss_g = F.smooth_l1_loss(utility_scorer(X_f_curr[b], X_f_pri[b], X_c_k[b], X_loc_p[b]), target_g_k[b])
+            loss_g = F.smooth_l1_loss(utility_scorer(X_f_curr[b], X_f_pri[b], zeros_ck_tr[b], X_loc_p[b]), target_g_k[b])
             opt_ug.zero_grad()
             loss_g.backward()
             opt_ug.step()
     utility_scorer.eval()
 
-    # Predict Known probs and marginal utility g_k across all scenes
     with torch.inference_mode():
         all_known_probs = (
             known_head(
@@ -236,7 +223,7 @@ def run_single_fold(
             utility_scorer(
                 torch.from_numpy(f_curr_all.reshape(-1, 256)).to(device),
                 torch.from_numpy(f_pri_all.reshape(-1, 256)).to(device),
-                torch.from_numpy(c_k_all.reshape(-1)).to(device),
+                torch.zeros(n_tot * 1024, device=device),
                 torch.from_numpy(loc_p_all.reshape(-1)).to(device),
             )
             .cpu()
@@ -255,44 +242,38 @@ def run_single_fold(
         f_curr_all, c_k_all, res_curr_all, loc_p_all, all_known_probs, proto_intact, proto_minor
     )
 
-    # Train OpenWorldRiskScorer on Train + Val proxy severe cells (strictly disjoint from Test-Fold)
-    risk_scorer = OpenWorldRiskScorer(d=256, hidden=128).to(device)
-    opt_rk = torch.optim.AdamW(risk_scorer.parameters(), lr=2.2e-3, weight_decay=1e-4)
-    Y_proxy_tv = (
-        torch.from_numpy(
-            (((cell_gt_all[idx_tv, :, 3] + cell_gt_all[idx_tv, :, 4]) >= 48) & (loc_p_all[idx_tv] > 0.20))
-            .astype(np.float32)
-            .reshape(-1)
-        ).to(device)
+    # Strictly Out-of-Sample 2-Fold Cross-Fitting of OpenWorldRiskScorer on Val-Proxy (ZERO in-sample optimism!)
+    val_a = idx_val[::2]
+    val_b = idx_val[1::2]
+    rk_a = _train_risk_scorer_subset(
+        np.concatenate([idx_train, val_a]), f_curr_all, f_pri_all, logits_curr_all, logits_pri_all,
+        extra_risk_all, cell_gt_all, loc_p_all, device, epochs=24,
     )
-    X_extra_tv = torch.from_numpy(extra_risk_all[idx_tv].reshape(-1, 6)).to(device)
-    for _ in range(20):
-        perm = torch.randperm(n_tv_tok, device=device)
-        for i in range(0, n_tv_tok, batch_sz):
-            b = perm[i : i + batch_sz]
-            pred_r = risk_scorer(
-                X_f_curr_tv[b], X_f_pri_tv[b], Y_teacher_tv[b], Y_pri_teacher_tv[b], X_extra_tv[b]
-            )
-            w_pos = torch.where(Y_proxy_tv[b] > 0.5, 4.5, 1.0)
-            loss_r = F.binary_cross_entropy(pred_r, Y_proxy_tv[b], weight=w_pos)
-            opt_rk.zero_grad()
-            loss_r.backward()
-            opt_rk.step()
-    risk_scorer.eval()
+    rk_b = _train_risk_scorer_subset(
+        np.concatenate([idx_train, val_b]), f_curr_all, f_pri_all, logits_curr_all, logits_pri_all,
+        extra_risk_all, cell_gt_all, loc_p_all, device, epochs=24,
+    )
 
-    with torch.inference_mode():
-        all_raw_risk = (
-            risk_scorer(
-                torch.from_numpy(f_curr_all.reshape(-1, 256)).to(device),
-                torch.from_numpy(f_pri_all.reshape(-1, 256)).to(device),
-                torch.from_numpy(logits_curr_all.reshape(-1, 5)).to(device),
-                torch.from_numpy(logits_pri_all.reshape(-1, 5)).to(device),
-                torch.from_numpy(extra_risk_all.reshape(-1, 6)).to(device),
+    def _predict_rk(model: OpenWorldRiskScorer, idxs: np.ndarray) -> np.ndarray:
+        with torch.inference_mode():
+            return (
+                model(
+                    torch.from_numpy(f_curr_all[idxs].reshape(-1, 256)).to(device),
+                    torch.from_numpy(f_pri_all[idxs].reshape(-1, 256)).to(device),
+                    torch.from_numpy(logits_curr_all[idxs].reshape(-1, 5)).to(device),
+                    torch.from_numpy(logits_pri_all[idxs].reshape(-1, 5)).to(device),
+                    torch.from_numpy(extra_risk_all[idxs].reshape(-1, 6)).to(device),
+                )
+                .cpu()
+                .numpy()
+                .reshape(len(idxs), 1024)
             )
-            .cpu()
-            .numpy()
-            .reshape(n_tot, 1024)
-        )
+
+    all_raw_risk = np.zeros((n_tot, 1024), dtype=np.float32)
+    all_raw_risk[val_b] = _predict_rk(rk_a, val_b)
+    all_raw_risk[val_a] = _predict_rk(rk_b, val_a)
+    all_raw_risk[idx_test] = 0.5 * (_predict_rk(rk_a, idx_test) + _predict_rk(rk_b, idx_test))
+    all_raw_risk[idx_train] = 0.5 * (_predict_rk(rk_a, idx_train) + _predict_rk(rk_b, idx_train))
 
     p_curr_sm = torch.from_numpy(logits_curr_all).softmax(dim=-1).numpy()
     all_known_saliency = (
@@ -314,7 +295,7 @@ def run_single_fold(
     ) & (loc_p_all[idx_test] > 0.24)
 
     calibrator = CalibratedOpenWorldRiskEstimator(n_bins=20, safety_z=1.15)
-    val_active = (loc_p_all[idx_val] > 0.12) | (c_k_all[idx_val] > 0.14)
+    val_active = (loc_p_all[idx_val] > 0.08) | (c_k_all[idx_val] > 0.12)
     calibrator.fit(all_raw_risk[idx_val], val_unknown_gt, active_mask=val_active)
 
     test_cal_prob = calibrator.predict_prob(all_raw_risk[idx_test])
@@ -339,9 +320,12 @@ def run_single_fold(
     methods = [
         "current_top_k",
         "stars_adapted",
+        "fmsat_adapted",
         "change_only",
         "stateful_utility_only",
+        "stateful_utility_equal_codec",
         "twist_inspired",
+        "twist_equal_codec",
         "safesync",
     ]
     fold_metrics = {}
@@ -407,7 +391,17 @@ def main() -> None:
         )
 
     total_sec = time.perf_counter() - t_start
-    methods = ["current_top_k", "stars_adapted", "change_only", "stateful_utility_only", "twist_inspired", "safesync"]
+    methods = [
+        "current_top_k",
+        "stars_adapted",
+        "fmsat_adapted",
+        "change_only",
+        "stateful_utility_only",
+        "stateful_utility_equal_codec",
+        "twist_inspired",
+        "twist_equal_codec",
+        "safesync",
+    ]
     summary = {}
     for m in methods:
         row = {}
@@ -421,11 +415,20 @@ def main() -> None:
             row[f"{k}_ci95"] = round(ci95, 4)
         summary[m] = row
 
-    # Paired statistical tests (SafeSync vs each baseline across the 5 folds)
+    # Paired statistical tests (SafeSync vs each baseline across the 5 folds, including Equal-Codec!)
     ss_sync = np.array([fr["methods"]["safesync"]["sync_f1"] for fr in fold_results])
     ss_umiss = np.array([fr["methods"]["safesync"]["u_miss"] for fr in fold_results])
     stat_tests = {}
-    for b in ["current_top_k", "stars_adapted", "change_only", "stateful_utility_only", "twist_inspired"]:
+    for b in [
+        "current_top_k",
+        "stars_adapted",
+        "fmsat_adapted",
+        "change_only",
+        "stateful_utility_only",
+        "stateful_utility_equal_codec",
+        "twist_inspired",
+        "twist_equal_codec",
+    ]:
         b_sync = np.array([fr["methods"][b]["sync_f1"] for fr in fold_results])
         b_umiss = np.array([fr["methods"][b]["u_miss"] for fr in fold_results])
         t_sync, p_sync = stats.ttest_rel(ss_sync, b_sync)
@@ -438,6 +441,20 @@ def main() -> None:
             "u_miss_paired_t": round(float(t_umiss), 3),
             "u_miss_p_value": float(p_umiss),
         }
+
+    compact_per_fold = []
+    for fr in fold_results:
+        compact_per_fold.append({
+            "fold": fr["fold"],
+            "ece_calibrated": round(fr["ece_calibrated"], 4),
+            "elapsed_seconds": round(fr["elapsed_seconds"], 2),
+            "safesync": {k: round(fr["methods"]["safesync"][k], 3) for k in ("known_f1", "sync_f1", "u_miss", "event_miss_prob", "rate_kb_per_frame")},
+            "stateful_utility_equal_codec": {k: round(fr["methods"]["stateful_utility_equal_codec"][k], 3) for k in ("known_f1", "sync_f1", "u_miss", "event_miss_prob")},
+            "twist_equal_codec": {k: round(fr["methods"]["twist_equal_codec"][k], 3) for k in ("known_f1", "sync_f1", "u_miss", "event_miss_prob")},
+            "stateful_utility_only": {k: round(fr["methods"]["stateful_utility_only"][k], 3) for k in ("known_f1", "sync_f1", "u_miss")},
+            "twist_inspired": {k: round(fr["methods"]["twist_inspired"][k], 3) for k in ("known_f1", "sync_f1", "u_miss")},
+            "stars_adapted": {k: round(fr["methods"]["stars_adapted"][k], 3) for k in ("known_f1", "sync_f1", "u_miss")},
+        })
 
     out = {
         "protocol": "5-Fold Stratified Disaster-Scene Cross-Validation across all 440 bi-temporal xBD pairs (450,560 tokens)",
@@ -467,6 +484,7 @@ def main() -> None:
         "mean_ece_calibrated": out["mean_ece_calibrated"],
         "summary_5fold": out["summary_5fold"],
         "paired_significance_tests": out["paired_significance_tests"],
+        "per_fold_compact": compact_per_fold,
     }
     main_res_path.write_text(json.dumps(main_res, indent=2), encoding="utf-8")
     print(f"[5-Fold CV Complete] Saved {out_path} in {total_sec:.2f}s ({total_sec/3600.0:.4f} GPU-h)")

@@ -203,8 +203,8 @@ def add_band_legend(
 #           (Native 7.16 x 3.32 in, Crisp Comic Sans MS Academic Style)
 # ==============================================================================
 def plot_fig1_architecture(res: Dict) -> None:
-    comic_reg_path = Path("assets/fonts/comic.ttf")
-    comic_bold_path = Path("assets/fonts/comicbd.ttf")
+    comic_reg_path = Path(r"C:\Windows\Fonts\comic.ttf")
+    comic_bold_path = Path(r"C:\Windows\Fonts\comicbd.ttf")
     fp_reg = FontProperties(fname=str(comic_reg_path)) if comic_reg_path.exists() else FontProperties(family="sans-serif")
     fp_bold = FontProperties(fname=str(comic_bold_path)) if comic_bold_path.exists() else FontProperties(family="sans-serif", weight="bold")
 
@@ -456,7 +456,16 @@ def plot_fig1_architecture(res: Dict) -> None:
             q_b = (s3_cx - rx * t, cy_l - ry * (1 - t))
             ax.plot([q_a[0], q_b[0]], [q_a[1], q_b[1]], color="#FFFFFF", lw=0.45, alpha=0.85, zorder=6 + li * 2)
 
-    ctext(s3_cx, 5.2, "2D Causal Spatio-Temp\nPrefix Codec (5.9 b/tok)", size=5.5, bold=True, color="#0F172A")
+    ss_wire = res["aggregated_3seed"]["budget_sweep"]["safesync"][3]
+    ob_w = ss_wire["overhead_breakdown_bits"]
+    tot_wb = ob_w["total_bits"]
+    hdr_b = ob_w["header_bits"]
+    msk_b = ob_w["mask_bits"]
+    saf_b = ob_w["safety_meta_bits"]
+    tok_b = ob_w["token_payload_bits"]
+    n_tok_w = ss_wire["mean_selected_tokens"]
+    bpt_dyn = tok_b / max(1.0, n_tok_w)
+    ctext(s3_cx, 5.2, f"2D Causal Spatio-Temp\nPrefix Codec ({bpt_dyn:.1f} b/tok)", size=5.5, bold=True, color="#0F172A")
 
     # ==================== STAGE 4: LEO ISL Relay Mesh ====================
     s4_cx = col_x[3] + col_w / 2.0
@@ -503,9 +512,9 @@ def plot_fig1_architecture(res: Dict) -> None:
     ax.add_patch(Wedge((s5_cx + 0.6, 39.2), 3.7, 138, 318, facecolor="#E2E8F0", edgecolor="#1E293B", lw=0.95, zorder=7))
     ax.plot([s5_cx + 0.2, s5_cx + 2.5], [38.9, 41.2], color="#1E293B", lw=1.0, zorder=8)
     ax.add_patch(Circle((s5_cx + 2.6, 41.3), 0.45, facecolor="#7C3AED", edgecolor="#1E293B", lw=0.6, zorder=9))
-    # Incoming compact 324-B packet badge
+    # Incoming compact packet badge
     draw_card(s5_cx + 4.4, 39.2, 5.2, 3.6, fc="#DBEAFE", ec="#2563EB", lw=0.8, r=0.8, shadow=False, z=8)
-    ctext(s5_cx + 7.0, 41.0, "324 B", size=4.8, bold=True, color="#1D4ED8")
+    ctext(s5_cx + 7.0, 41.0, f"{int(round(tot_wb/8.0))} B", size=4.8, bold=True, color="#1D4ED8")
 
     # Idempotent State Algebra Pill
     draw_card(col_x[4] + 1.8, 26.2, col_w - 3.6, 5.4, fc="#FFFFFF", ec="#7C3AED", lw=1.0, r=2.4, shadow=False, z=6)
@@ -525,21 +534,12 @@ def plot_fig1_architecture(res: Dict) -> None:
     ctext(col_x[4] + 18.6, 3.75, "Rescued $S_{\\mathrm{safe}}$", size=4.9, bold=True, color="#1E293B")
 
     # ==================== BOTTOM UNIFIED WIRE PACKET BAR ====================
-    ss_wire = res["aggregated_3seed"]["budget_sweep"]["safesync"][3]
-    ob_w = ss_wire["overhead_breakdown_bits"]
-    tot_wb = ob_w["total_bits"]
-    hdr_b = ob_w["header_bits"]
-    msk_b = ob_w["mask_bits"]
-    saf_b = ob_w["safety_meta_bits"]
-    tok_b = ob_w["token_payload_bits"]
-    n_tok_w = ss_wire["mean_selected_tokens"]
-
     bar_y, bar_h = -9.4, 6.8
     bar_segs = [
         (2.0,  24.8, f"128-b SSYN Header ({hdr_b/tot_wb*100:.1f}%)", "root_id | prior_hash | CRC32", "#DBEAFE", "#2563EB"),
-        (27.2, 26.8, f"Spatial Mask ({msk_b/tot_wb*100:.1f}%)", f"Zlib 32×32 Bitmap ({msk_b:.0f} b)", "#CCFBF1", "#0E747A"),
+        (27.2, 26.8, f"Spatial Mask ({msk_b/tot_wb*100:.1f}%)", f"2D-Arith 32×32 Mask ({msk_b:.0f} b)", "#CCFBF1", "#0E747A"),
         (54.4, 20.6, f"Safety Meta ({saf_b/tot_wb*100:.1f}%)", f"Ordered Risk ({saf_b:.0f} b)", "#FEF3C7", "#C87A14"),
-        (75.4, 37.8, f"2D Causal Prefix Payload ({tok_b/tot_wb*100:.1f}%)", f"{tok_b:,.0f} b ({n_tok_w:.1f} tok, 324.4 B/frame)", "#D1FAE5", "#0E8A5F"),
+        (75.4, 37.8, f"2D Causal Prefix Payload ({tok_b/tot_wb*100:.1f}%)", f"{tok_b:,.0f} b ({n_tok_w:.1f} tok, {tot_wb/8.0:.1f} B/frame)", "#D1FAE5", "#0E8A5F"),
         (113.6, 24.4, "64-b RKS Handshake", "Bloom | Digest | Age", "#EDE9FE", "#7C3AED"),
     ]
     for bx, bw, btitle, bsub, bfc, bec in bar_segs:
@@ -616,7 +616,7 @@ def plot_fig2_pareto(res: Dict) -> None:
     tw_pt = curves["twist_inspired"][3]
     gain_tw = ss_pt["sync_f1"] - tw_pt["sync_f1"]
     axes[1].annotate(
-        f"SafeSync (2.59 kb)\n{ss_pt['sync_f1']:.1f}% (+{gain_tw:.1f} vs TWIST)",
+        f"SafeSync ({ss_pt['rate_kb_per_frame']:.2f} kb)\n{ss_pt['sync_f1']:.1f}% (+{gain_tw:.1f} vs TWIST)",
         xy=(ss_pt["rate_kb_per_frame"], ss_pt["sync_f1"]),
         xytext=(3.65, 31.5),
         arrowprops=dict(arrowstyle="->", color="#0072B2", lw=0.95, connectionstyle="arc3,rad=-0.16"),
@@ -671,32 +671,32 @@ def plot_fig3_safety_calibration(res: Dict) -> None:
     axes[0].annotate(
         f"-{tw3['u_miss'] - ss3['u_miss']:.1f} pp\nvs. TWIST",
         xy=(ss3["rate_kb_per_frame"], ss3["u_miss"]),
-        xytext=(0.75, 4.5),
-        arrowprops=dict(arrowstyle="->", color="#0072B2", lw=0.9, connectionstyle="arc3,rad=0.14"),
-        fontsize=5.9, fontweight="bold", color="#0072B2",
-        bbox=dict(boxstyle="round,pad=0.15", fc="#F0F9FF", ec="#0072B2", lw=0.65),
+        xytext=(0.42, 3.0),
+        arrowprops=dict(arrowstyle="->", color="#0072B2", lw=0.85, connectionstyle="arc3,rad=0.14"),
+        fontsize=5.4, fontweight="bold", color="#0072B2",
+        bbox=dict(boxstyle="round,pad=0.14", fc="#F0F9FF", ec="#0072B2", lw=0.65),
     )
     h0, l0 = axes[0].get_legend_handles_labels()
     add_band_legend(fig, h0, l0, x_centers[0], ncol=3, fontsize=5.8, colspacing=0.45, handlelength=1.15)
 
-    # Panel (b)
+    # Panel (b): Unclamped Proposition 1 Empirical Coverage (Token U-Miss & Scene Event Miss vs. delta)
     deltas = [c["requested_delta"] * 100.0 for c in cov]
-    cal_miss = [c["safesync_calibrated_event_miss"] * 100.0 for c in cov]
-    uncal_miss = [c["uncalibrated_event_miss"] * 100.0 for c in cov]
+    cal_evt = [c["safesync_calibrated_event_miss"] * 100.0 for c in cov]
+    cal_tok = [c["safesync_calibrated_token_miss"] * 100.0 for c in cov]
 
     axes[1].plot([0, 55], [0, 55], color="#475569", linestyle="--", linewidth=1.0,
                  label="Prop. 1 ($P_{\\mathrm{miss}}=\\delta$)")
     axes[1].fill_between([0, 55], [0, 0], [0, 55], color="#DCFCE7", alpha=0.40,
                          label="Valid ($P_{\\mathrm{miss}}\\leq\\delta$)")
-    axes[1].plot(deltas, uncal_miss, color="#D55E00", marker="s", linestyle="--",
-                 linewidth=1.05, label="Uncalibrated")
-    axes[1].plot(deltas, cal_miss, color="#0072B2", marker="o", linestyle="-",
-                 linewidth=1.40, label="Calibrated $p_k$")
+    axes[1].plot(deltas, cal_tok, color="#0072B2", marker="o", linestyle="-",
+                 linewidth=1.40, label="Token U-Miss")
+    axes[1].plot(deltas, cal_evt, color="#009E73", marker="^", linestyle="-.",
+                 linewidth=1.20, label="Scene Evt Miss")
 
     axes[1].set_xlim(2, 53)
-    axes[1].set_ylim(0, 55)
+    axes[1].set_ylim(-1.5, 55)
     axes[1].set_xlabel("Requested Risk Target $\\delta$ (%)")
-    axes[1].set_ylabel("Scene Unknown Miss (%) $\\downarrow$")
+    axes[1].set_ylabel("Empirical Miss (%) $\\downarrow$")
     h1, l1 = axes[1].get_legend_handles_labels()
     add_band_legend(fig, h1, l1, x_centers[1], ncol=2, fontsize=5.8, colspacing=0.5, handlelength=1.2)
 
@@ -710,9 +710,9 @@ def plot_fig3_safety_calibration(res: Dict) -> None:
 
     axes[2].plot([0, 1], [0, 1], color="#475569", linestyle="--", linewidth=1.0, label="Ideal")
     axes[2].plot(raw_x, raw_y, color="#D55E00", marker="s", linestyle="--", linewidth=1.05,
-                 label=f"Raw (ECE={agg['ece_uncalibrated_mean']:.2f})")
+                 label=f"Raw (ECE={agg['ece_uncalibrated_mean']:.3f})")
     axes[2].plot(cal_x, cal_y, color="#0072B2", marker="o", linestyle="-", linewidth=1.40,
-                 label=f"Calib. (ECE={agg['ece_calibrated_mean']:.2f})")
+                 label=f"Calib. (ECE={agg['ece_calibrated_mean']:.3f})")
 
     axes[2].set_xlim(0, 0.98)
     axes[2].set_ylim(0, 0.98)
@@ -762,8 +762,8 @@ def plot_fig4_temporal_and_registration(res: Dict) -> None:
     ax1.set_ylim(34, 78)
     ax1_r.set_ylim(0, max(12.5, max(ss_rates) * 1.45))
     for a_val, r_val in zip(ages, ss_rates):
-        ax1_r.text(a_val, r_val + 0.30, f"{r_val:.1f}kb", ha="center", va="bottom",
-                   fontsize=6.1, fontweight="bold", color="#334155")
+        ax1_r.text(a_val, r_val * 0.48, f"{r_val:.1f}kb", ha="center", va="center",
+                   fontsize=6.0, fontweight="bold", color="#1E3A5F")
     h_a = l1 + l2 + [b1]
     add_band_legend(fig, h_a, [x.get_label() for x in h_a], x_centers[0], ncol=2, fontsize=5.8)
 
@@ -828,8 +828,9 @@ def plot_fig4_temporal_and_registration(res: Dict) -> None:
 
     for s, r in zip(sigmas, adapt_rate):
         if s >= 2:
+            tx, ty = (s - 1.45, r - 1.15) if s == 8 else (s - 0.85, r + 0.55)
             ax2_r.annotate(f"{r:.1f}kb", xy=(s, r),
-                           xytext=(s - 0.85, r + 0.55),
+                           xytext=(tx, ty),
                            fontsize=5.9, fontweight="bold", color="#009E73",
                            bbox=dict(boxstyle="round,pad=0.08", fc="white", ec="none", alpha=0.85))
 
@@ -909,8 +910,8 @@ def plot_fig5_overhead_and_channel(res: Dict) -> None:
     ax2.annotate(
         f"+{gain_4db:.1f} pp @ 4 dB",
         xy=(snrs[0], ss_f1[0]),
-        xytext=(snrs[0] + 2.3, ss_f1[0] + 5.8),
-        arrowprops=dict(arrowstyle="->", color="#0072B2", lw=0.9, connectionstyle="arc3,rad=0.15"),
+        xytext=(snrs[0] + 2.4, max(ss_f1) + 7.2),
+        arrowprops=dict(arrowstyle="->", color="#0072B2", lw=0.9, connectionstyle="arc3,rad=0.14"),
         fontsize=5.8, fontweight="bold", color="#0072B2",
         bbox=dict(boxstyle="round,pad=0.14", fc="#F0F9FF", ec="#0072B2", lw=0.65),
     )
@@ -918,7 +919,7 @@ def plot_fig5_overhead_and_channel(res: Dict) -> None:
     ax2.set_xticks(snrs)
     ax2.set_xlabel("Rician SNR (dB) ($K=6$ dB)")
     ax2.set_ylabel("Open-World Sync-F1 (%) $\\uparrow$", color="#0F172A")
-    ax2.set_ylim(max(18, min(tk_f1) - 4), max(ss_f1) + 10.5)
+    ax2.set_ylim(max(14, min(tk_f1) - 4), max(ss_f1) + 15.0)
     hb2 = p1 + p2 + p3 + p4 + p5
     add_band_legend(fig, hb2, [item.get_label() for item in hb2], x_centers[1], ncol=3, fontsize=5.7, colspacing=0.42, handlelength=1.1)
 
@@ -935,18 +936,21 @@ def plot_fig5_overhead_and_channel(res: Dict) -> None:
     s1 = ax3.plot(rhos, r_kf1, color="#009E73", marker="^", linestyle="--", linewidth=1.05, label="Known F1")
     s2 = ax3.plot(rhos, r_sf1, color="#0072B2", marker="o", linestyle="-", linewidth=1.45, label="Sync-F1")
     s3 = ax3_r.plot(rhos, r_umiss, color="#D55E00", marker="s", linestyle="-.", linewidth=1.15, label="U-Miss $\\downarrow$")
-    ax3.axvline(0.25, color="#0072B2", linestyle=":", linewidth=1.0, alpha=0.85)
-    knee_sf1 = r_sf1[3]
-    ax3.annotate("$\\rho_{\\mathrm{safe}}=0.25$", xy=(0.25, knee_sf1), xytext=(0.275, 62.6),
-                 arrowprops=dict(arrowstyle="->", color="#0072B2", lw=0.85),
-                 fontsize=5.8, fontweight="bold", color="#0072B2",
+    def_idx = next((i for i, v in enumerate(rhos) if abs(v - 0.35) < 1e-4), min(3, len(rhos) - 1))
+    knee_rho = rhos[def_idx]
+    knee_sf1 = r_sf1[def_idx]
+    ax3.axvline(knee_rho, color="#0072B2", linestyle=":", linewidth=1.0, alpha=0.85)
+    ax3.annotate(f"Default $\\rho_{{\\mathrm{{safe}}}}={knee_rho:.2f}$", xy=(knee_rho, knee_sf1),
+                 xytext=(0.06, min(r_sf1) - 1.55),
+                 arrowprops=dict(arrowstyle="->", color="#0072B2", lw=0.85, connectionstyle="arc3,rad=-0.12"),
+                 fontsize=5.6, fontweight="bold", color="#0072B2",
                  bbox=dict(boxstyle="round,pad=0.14", fc="#EFF6FF", ec="#0072B2", lw=0.6))
 
     ax3.set_xlabel("Safety Reserve Cap $\\rho_{\\mathrm{safe}}$")
     ax3.set_ylabel("Known / Sync-F1 (%) $\\uparrow$")
     ax3_r.set_ylabel("U-Miss (%) $\\downarrow$", color="#D55E00")
-    ax3.set_ylim(58.8, 71.8)
-    ax3_r.set_ylim(17.5, 51.0)
+    ax3.set_ylim(min(min(r_sf1), min(r_kf1)) - 2.5, max(max(r_sf1), max(r_kf1)) + 2.5)
+    ax3_r.set_ylim(max(0.0, min(r_umiss) - 4.0), max(r_umiss) + 6.0)
     hc3 = s1 + s2 + s3
     add_band_legend(fig, hc3, [item.get_label() for item in hc3], x_centers[2], ncol=2, fontsize=5.8)
 
@@ -1065,9 +1069,8 @@ def plot_fig6_qualitative() -> None:
         axes[row][2].imshow(comp, interpolation="nearest")
 
         k_budget = 190
-        g_closed_only = g_map * np.where(u_vec, 0.18, 1.0)
-        util_sel = set(np.argsort(-g_closed_only)[:k_budget].tolist())
-        safe_sel = set(np.where(u_vec)[0].tolist()) | set(np.argsort(-p_risk)[:36].tolist())
+        util_sel = set(np.argsort(-g_map)[:k_budget].tolist())
+        safe_sel = set(np.argsort(-p_risk)[:48].tolist())
         rem_budget = max(0, k_budget - len(safe_sel))
         rem_cands = [k for k in np.argsort(-g_map).tolist() if k not in safe_sel]
         ss_sel = safe_sel | set(rem_cands[:rem_budget])
@@ -1204,13 +1207,13 @@ def plot_fig7_multisat_constellation(res: Dict) -> None:
 
     # Panel (b)
     label_pos_b = {
-        "safesync_mesh": (36.0, 16.5),
-        "receiver_aware_no_prov": (8.0, 92.0),
-        "stateless_vq_flood": (112.0, 62.5),
-        "sender_utility_relay": (14.0, 39.0),
-        "fmsat_generative_relay": (112.0, 45.0),
-        "jpeg90_fragment_relay": (152.0, 77.5),
-        "raw_png_relay": (132.0, 95.5),
+        "safesync_mesh": (42.0, 14.0),
+        "stateless_vq_flood": (34.0, 82.0),
+        "fmsat_generative_relay": (30.0, 62.0),
+        "sender_utility_relay": (122.0, 46.0),
+        "receiver_aware_no_prov": (132.0, 91.5),
+        "jpeg90_fragment_relay": (212.0, 61.0),
+        "raw_png_relay": (218.0, 102.0),
     }
     for m_key, m_label, color, marker, _ in ms_methods:
         if m_key not in w_sweep:
@@ -1227,14 +1230,14 @@ def plot_fig7_multisat_constellation(res: Dict) -> None:
             xy=(ttc, umiss),
             xytext=(tx, ty),
             arrowprops=(dict(arrowstyle="-", color="#64748B", lw=0.65, shrinkA=1, shrinkB=3) if use_arrow else None),
-            fontsize=5.5,
+            fontsize=5.4,
             fontweight="bold" if m_key == "safesync_mesh" else "normal",
             color=color if m_key == "safesync_mesh" else "#1E293B",
             va="center",
         )
 
-    axes[1].set_xlim(2, 238)
-    axes[1].set_ylim(max(5, ss200["constellation_u_miss_pct"] - 9), 106)
+    axes[1].set_xlim(0, 315)
+    axes[1].set_ylim(max(2, ss200["constellation_u_miss_pct"] - 9), 108)
     axes[1].set_xlabel("Time-to-Confirm $\\tau_{\\mathrm{confirm}}$ (s) $\\downarrow$")
     axes[1].set_ylabel("Constellation U-Miss (%) $\\downarrow$")
 
@@ -1256,8 +1259,8 @@ def plot_fig7_multisat_constellation(res: Dict) -> None:
 
     ax3.set_xticks(hops)
     ax3.set_xticklabels([f"{h}h" for h in hops])
-    ax3.set_ylim(-2, 66)
-    ax3_r.set_ylim(-0.02, 0.36)
+    ax3.set_ylim(-3, 76)
+    ax3_r.set_ylim(-0.008, 0.13)
     ax3.set_xlabel("LEO ISL Relay Hop Count $H$")
     ax3.set_ylabel("Duplicate ISL (%) $\\downarrow$", color="#0F172A")
     ax3_r.set_ylabel("Inflation $\\Delta q_{\\mathrm{infl}}$ $\\downarrow$", color="#475569")

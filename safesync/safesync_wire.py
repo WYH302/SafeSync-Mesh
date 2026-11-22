@@ -77,6 +77,320 @@ def unpack_bits_from_bytes(buf: bytes, bit_lengths: np.ndarray) -> np.ndarray:
     return out
 
 
+def _encode_mask_2d_arith(mask_flat: np.ndarray) -> bytes:
+    """Lossless 16-context 2D causal binary arithmetic coder (W, NW, N, NE neighbors) for 32x32 masks."""
+    ml = np.asarray(mask_flat, dtype=np.uint8).ravel().tolist()
+    c0 = [1] * 16
+    c1 = [1] * 16
+    lo = 0
+    hi = 0xFFFFFFFF
+    out = bytearray()
+    out_append = out.append
+    for r in range(32):
+        base = r << 5
+        pbase = base - 32
+        w = 0
+        for c in range(32):
+            if r > 0:
+                nw = ml[pbase + c - 1] if c > 0 else 0
+                n = ml[pbase + c]
+                ne = ml[pbase + c + 1] if c < 31 else 0
+                ctx = (w << 3) | (nw << 2) | (n << 1) | ne
+            else:
+                ctx = w << 3
+            a0 = c0[ctx]
+            a1 = c1[ctx]
+            split = lo + ((hi - lo + 1) * a0) // (a0 + a1) - 1
+            if split < lo:
+                split = lo
+            elif split >= hi:
+                split = hi - 1
+            bit = ml[base + c]
+            if bit == 0:
+                hi = split
+                a0 += 2
+            else:
+                lo = split + 1
+                a1 += 2
+            if a0 + a1 > 512:
+                a0 = (a0 + 1) >> 1
+                a1 = (a1 + 1) >> 1
+            c0[ctx] = a0
+            c1[ctx] = a1
+            w = bit
+            while (lo ^ hi) < 0x01000000:
+                out_append((lo >> 24) & 0xFF)
+                lo = (lo << 8) & 0xFFFFFFFF
+                hi = ((hi << 8) | 0xFF) & 0xFFFFFFFF
+    for shift in (24, 16, 8, 0):
+        out_append((lo >> shift) & 0xFF)
+    return bytes(out)
+
+
+def _decode_mask_2d_arith(buf: bytes) -> np.ndarray:
+    """Exact bit-for-bit inverse of _encode_mask_2d_arith for a 32x32 binary mask."""
+    if len(buf) < 4:
+        raise ValueError("truncated 2D arithmetic mask bitstream")
+    ml = [0] * 1024
+    c0 = [1] * 16
+    c1 = [1] * 16
+    lo = 0
+    hi = 0xFFFFFFFF
+    code = (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3]
+    pos = 4
+    blen = len(buf)
+    for r in range(32):
+        base = r << 5
+        pbase = base - 32
+        w = 0
+        for c in range(32):
+            if r > 0:
+                nw = ml[pbase + c - 1] if c > 0 else 0
+                n = ml[pbase + c]
+                ne = ml[pbase + c + 1] if c < 31 else 0
+                ctx = (w << 3) | (nw << 2) | (n << 1) | ne
+            else:
+                ctx = w << 3
+            a0 = c0[ctx]
+            a1 = c1[ctx]
+            split = lo + ((hi - lo + 1) * a0) // (a0 + a1) - 1
+            if split < lo:
+                split = lo
+            elif split >= hi:
+                split = hi - 1
+            if code <= split:
+                bit = 0
+                hi = split
+                a0 += 2
+            else:
+                bit = 1
+                lo = split + 1
+                a1 += 2
+            ml[base + c] = bit
+            if a0 + a1 > 512:
+                a0 = (a0 + 1) >> 1
+                a1 = (a1 + 1) >> 1
+            c0[ctx] = a0
+            c1[ctx] = a1
+            w = bit
+            while (lo ^ hi) < 0x01000000:
+                lo = (lo << 8) & 0xFFFFFFFF
+                hi = ((hi << 8) | 0xFF) & 0xFFFFFFFF
+                nxt = buf[pos] if pos < blen else 0
+                pos += 1
+                code = ((code << 8) | nxt) & 0xFFFFFFFF
+    return np.array(ml, dtype=bool)
+
+
+def _encode_safe_flags_arith(flags: np.ndarray) -> bytes:
+    """Lossless 2-context (previous-flag Markov) adaptive binary arithmetic coder for sparse S_safe indicators."""
+    fl = np.asarray(flags, dtype=np.uint8).ravel().tolist()
+    c0 = [4, 2]
+    c1 = [1, 2]
+    lo = 0
+    hi = 0xFFFFFFFF
+    out = bytearray()
+    out_append = out.append
+    prev = 0
+    for bit in fl:
+        a0 = c0[prev]
+        a1 = c1[prev]
+        split = lo + ((hi - lo + 1) * a0) // (a0 + a1) - 1
+        if split < lo:
+            split = lo
+        elif split >= hi:
+            split = hi - 1
+        if bit == 0:
+            hi = split
+            a0 += 2
+        else:
+            lo = split + 1
+            a1 += 2
+        if a0 + a1 > 512:
+            a0 = (a0 + 1) >> 1
+            a1 = (a1 + 1) >> 1
+        c0[prev] = a0
+        c1[prev] = a1
+        prev = bit
+        while (lo ^ hi) < 0x01000000:
+            out_append((lo >> 24) & 0xFF)
+            lo = (lo << 8) & 0xFFFFFFFF
+            hi = ((hi << 8) | 0xFF) & 0xFFFFFFFF
+    for shift in (24, 16, 8, 0):
+        out_append((lo >> shift) & 0xFF)
+    return bytes(out)
+
+
+def _decode_safe_flags_arith(buf: bytes, n_sel: int) -> np.ndarray:
+    """Exact bit-for-bit inverse of _encode_safe_flags_arith."""
+    if len(buf) < 4:
+        raise ValueError("truncated arithmetic safety flag stream")
+    fl = [0] * n_sel
+    c0 = [4, 2]
+    c1 = [1, 2]
+    lo = 0
+    hi = 0xFFFFFFFF
+    code = (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3]
+    pos = 4
+    blen = len(buf)
+    prev = 0
+    for i in range(n_sel):
+        a0 = c0[prev]
+        a1 = c1[prev]
+        split = lo + ((hi - lo + 1) * a0) // (a0 + a1) - 1
+        if split < lo:
+            split = lo
+        elif split >= hi:
+            split = hi - 1
+        if code <= split:
+            bit = 0
+            hi = split
+            a0 += 2
+        else:
+            bit = 1
+            lo = split + 1
+            a1 += 2
+        fl[i] = bit
+        if a0 + a1 > 512:
+            a0 = (a0 + 1) >> 1
+            a1 = (a1 + 1) >> 1
+        c0[prev] = a0
+        c1[prev] = a1
+        prev = bit
+        while (lo ^ hi) < 0x01000000:
+            lo = (lo << 8) & 0xFFFFFFFF
+            hi = ((hi << 8) | 0xFF) & 0xFFFFFFFF
+            nxt = buf[pos] if pos < blen else 0
+            pos += 1
+            code = ((code << 8) | nxt) & 0xFFFFFFFF
+    return np.array(fl, dtype=bool)
+
+
+def _pack_ranks_range(ranks: list[int]) -> bytes:
+    """Adaptive 6-tier range coder (rANS-equivalent entropy efficiency) for ranks in {0..511}.
+
+    Tiers: 0 -> {0} (0b), 1 -> {1..4} (2b), 2 -> {5..20} (4b), 3 -> {21..84} (6b), 4 -> {85..212} (7b), 5 -> {213..511} (9b).
+    Tier symbols are adaptively range-coded; exact sub-rank offsets are bit-packed losslessly.
+    """
+    if not ranks:
+        return b""
+    counts = [4, 4, 4, 3, 2, 2]
+    lo = 0
+    hi = 0xFFFFFFFF
+    tier_out = bytearray()
+    sub_lens: list[int] = []
+    sub_vals: list[int] = []
+    for r in ranks:
+        if r == 0:
+            t = 0
+        elif r <= 4:
+            t = 1
+            sub_lens.append(2); sub_vals.append(r - 1)
+        elif r <= 20:
+            t = 2
+            sub_lens.append(4); sub_vals.append(r - 5)
+        elif r <= 84:
+            t = 3
+            sub_lens.append(6); sub_vals.append(r - 21)
+        elif r <= 212:
+            t = 4
+            sub_lens.append(7); sub_vals.append(r - 85)
+        else:
+            t = 5
+            sub_lens.append(9); sub_vals.append(r)
+        tot = sum(counts)
+        cum = sum(counts[:t])
+        rng = hi - lo + 1
+        new_lo = lo + (rng * cum) // tot
+        new_hi = lo + (rng * (cum + counts[t])) // tot - 1
+        lo, hi = new_lo, max(new_lo, new_hi)
+        counts[t] += 3
+        if sum(counts) > 1024:
+            counts = [max(1, (x + 1) >> 1) for x in counts]
+        while (lo ^ hi) < 0x01000000:
+            tier_out.append((lo >> 24) & 0xFF)
+            lo = (lo << 8) & 0xFFFFFFFF
+            hi = ((hi << 8) | 0xFF) & 0xFFFFFFFF
+    for shift in (24, 16, 8, 0):
+        tier_out.append((lo >> shift) & 0xFF)
+    sub_bytes = pack_bits_to_bytes(np.array(sub_lens, dtype=np.int32), np.array(sub_vals, dtype=np.int32))
+    return struct.pack("<H", len(tier_out)) + bytes(tier_out) + sub_bytes
+
+
+def _unpack_ranks_range(buf: bytes, n_sel: int) -> list[int]:
+    """Exact bit-for-bit inverse of _pack_ranks_range."""
+    if n_sel == 0:
+        return []
+    tlen = struct.unpack("<H", buf[:2])[0]
+    tbuf = buf[2 : 2 + tlen]
+    sbuf = buf[2 + tlen :]
+    if len(tbuf) < 4:
+        raise ValueError("truncated range-coded rank stream")
+    counts = [4, 4, 4, 3, 2, 2]
+    lo = 0
+    hi = 0xFFFFFFFF
+    code = (tbuf[0] << 24) | (tbuf[1] << 16) | (tbuf[2] << 8) | tbuf[3]
+    pos = 4
+    blen = len(tbuf)
+    tiers: list[int] = []
+    sub_lens: list[int] = []
+    for _ in range(n_sel):
+        tot = sum(counts)
+        rng = hi - lo + 1
+        cum = 0
+        chosen_t = 5
+        chosen_lo = lo
+        chosen_hi = hi
+        for t in range(6):
+            n_lo = lo + (rng * cum) // tot
+            n_hi = lo + (rng * (cum + counts[t])) // tot - 1
+            if n_hi < n_lo:
+                n_hi = n_lo
+            if code <= n_hi or t == 5:
+                chosen_t = t
+                chosen_lo, chosen_hi = n_lo, n_hi
+                break
+            cum += counts[t]
+        tiers.append(chosen_t)
+        if chosen_t == 1:
+            sub_lens.append(2)
+        elif chosen_t == 2:
+            sub_lens.append(4)
+        elif chosen_t == 3:
+            sub_lens.append(6)
+        elif chosen_t == 4:
+            sub_lens.append(7)
+        elif chosen_t == 5:
+            sub_lens.append(9)
+        lo, hi = chosen_lo, chosen_hi
+        counts[chosen_t] += 3
+        if sum(counts) > 1024:
+            counts = [max(1, (x + 1) >> 1) for x in counts]
+        while (lo ^ hi) < 0x01000000:
+            lo = (lo << 8) & 0xFFFFFFFF
+            hi = ((hi << 8) | 0xFF) & 0xFFFFFFFF
+            nxt = tbuf[pos] if pos < blen else 0
+            pos += 1
+            code = ((code << 8) | nxt) & 0xFFFFFFFF
+    sub_vals = unpack_bits_from_bytes(sbuf, np.array(sub_lens, dtype=np.int32)).tolist() if sub_lens else []
+    si = 0
+    ranks: list[int] = []
+    for t in tiers:
+        if t == 0:
+            ranks.append(0)
+        elif t == 1:
+            ranks.append(sub_vals[si] + 1); si += 1
+        elif t == 2:
+            ranks.append(sub_vals[si] + 5); si += 1
+        elif t == 3:
+            ranks.append(sub_vals[si] + 21); si += 1
+        elif t == 4:
+            ranks.append(sub_vals[si] + 85); si += 1
+        else:
+            ranks.append(sub_vals[si]); si += 1
+    return ranks
+
+
 def _pack_st_ranks(ranks: list[int]) -> bytes:
     """Pack ranks in {0..511} with Kraft-tight instantaneous prefix code (LSB-first):
       - r == 0:        '0'           (1 bit)
@@ -262,6 +576,9 @@ def encode_safesync_packet(
     use_conditional_entropy: bool = True,
     is_refresh: bool = False,
     force_sparse_mask: bool = False,
+    use_2d_arith_mask: bool = True,
+    use_range_ranks: bool = False,
+    include_risk_bins: bool = False,
 ) -> dict:
     """Serialize a SafeSync-Mesh update packet into verifiable bytes and return exact wire bit accounting."""
     sel_mask = np.asarray(selected_mask, dtype=bool).reshape(1024)
@@ -270,40 +587,47 @@ def encode_safesync_packet(
     n_sel = int(len(sel_positions))
     n_safe = int(safe_mask.sum())
 
-    # 1. Spatial selection mask encoding
+    # 1. Spatial selection mask encoding (auto-pick strictly smallest wire representation)
     safe_positions = np.flatnonzero(safe_mask).astype(np.int32)
     util_positions = np.flatnonzero(sel_mask & (~safe_mask)).astype(np.int32)
     ordered_sparse_pos = np.concatenate([safe_positions, util_positions]) if n_safe > 0 else sel_positions
 
-    packed_bitmap = np.packbits(sel_mask.astype(np.uint8)).tobytes()  # 128 bytes
-    zlib_bitmap = zlib.compress(packed_bitmap, level=6)
     sparse_list_bytes = pack_bits_to_bytes(np.full(n_sel, 10, dtype=np.int32), ordered_sparse_pos)
     if n_sel == 1024:
         mask_mode = 0  # full grid, 0 mask bytes
         mask_bytes = b""
-    elif force_sparse_mask or len(sparse_list_bytes) <= len(zlib_bitmap) + 2:
-        mask_mode = 1  # 10-bit sparse index list (S_safe ordered first -> 0 safety flag bytes!)
+    elif force_sparse_mask:
+        mask_mode = 1
         mask_bytes = sparse_list_bytes
     else:
-        mask_mode = 2  # zlib compressed 32x32 bitmap
-        mask_bytes = struct.pack("<H", len(zlib_bitmap)) + zlib_bitmap
+        packed_bitmap = np.packbits(sel_mask.astype(np.uint8)).tobytes()  # 128 bytes
+        zlib_bitmap = zlib.compress(packed_bitmap, level=6)
+        cand_modes: list[tuple[int, bytes]] = [
+            (1, sparse_list_bytes),
+            (2, struct.pack("<H", len(zlib_bitmap)) + zlib_bitmap),
+        ]
+        if use_2d_arith_mask:
+            arith_mask = _encode_mask_2d_arith(sel_mask)
+            cand_modes.append((3, struct.pack("<H", len(arith_mask)) + arith_mask))
+        mask_mode, mask_bytes = min(cand_modes, key=lambda x: len(x[1]))
 
-    # 2. Compact safety metadata encoding (only if n_safe > 0)
-    compact_safe_idx = False
+    # 2. Compact lossless safety metadata encoding (only if n_safe > 0)
+    safe_flag_arith = False
     if n_safe > 0 and n_sel > 0:
-        risk_bins = np.clip(np.floor(calibrated_risk.reshape(1024)[safe_positions] * 7.999), 0, 7).astype(np.int32)
-        risk_bin_bytes = pack_bits_to_bytes(np.full(n_safe, 3, dtype=np.int32), risk_bins)
+        if include_risk_bins:
+            risk_bins = np.clip(np.floor(calibrated_risk.reshape(1024)[safe_positions] * 7.999), 0, 7).astype(np.int32)
+            risk_bin_bytes = pack_bits_to_bytes(np.full(n_safe, 3, dtype=np.int32), risk_bins)
+        else:
+            risk_bin_bytes = b""
         if mask_mode == 1:
             safety_meta_bytes = risk_bin_bytes
         else:
             sel_safe_flags = safe_mask[sel_positions].astype(np.int32)
             raw_sflag = pack_bits_to_bytes(np.ones(n_sel, dtype=np.int32), sel_safe_flags)
-            idx_bits = max(1, int(np.ceil(np.log2(max(2, n_sel)))))
-            local_safe_idx = np.flatnonzero(sel_safe_flags).astype(np.int32)
-            sparse_sflag = pack_bits_to_bytes(np.full(n_safe, idx_bits, dtype=np.int32), local_safe_idx)
-            if len(sparse_sflag) < len(raw_sflag):
-                compact_safe_idx = True
-                safety_meta_bytes = sparse_sflag + risk_bin_bytes
+            arith_sflag = _encode_safe_flags_arith(sel_safe_flags)
+            if len(arith_sflag) + 1 < len(raw_sflag) and len(arith_sflag) <= 255:
+                safe_flag_arith = True
+                safety_meta_bytes = struct.pack("<B", len(arith_sflag)) + arith_sflag + risk_bin_bytes
             else:
                 safety_meta_bytes = raw_sflag + risk_bin_bytes
     else:
@@ -349,7 +673,7 @@ def encode_safesync_packet(
                 mode_bytes = struct.pack("<H", len(mode_z)) + mode_z
             else:
                 mode_bytes = mode_raw
-            rank_bytes = _pack_st_ranks(ranks_list)
+            rank_bytes = _pack_ranks_range(ranks_list) if use_range_ranks else _pack_st_ranks(ranks_list)
             token_bytes = mode_bytes + rank_bytes
         else:
             token_bytes = pack_bits_to_bytes(np.full(n_sel, 9, dtype=np.int32), tgt_flat[sel_positions])
@@ -362,7 +686,9 @@ def encode_safesync_packet(
         | ((1 if use_conditional_entropy and not is_refresh else 0) << 2)
         | ((1 if is_refresh else 0) << 3)
         | ((1 if mode_zlib else 0) << 4)
-        | ((1 if compact_safe_idx else 0) << 5)
+        | ((1 if safe_flag_arith else 0) << 5)
+        | ((1 if (use_range_ranks and use_conditional_entropy and not is_refresh) else 0) << 6)
+        | ((1 if include_risk_bins else 0) << 7)
     )
     p_dig = prior_digest16(prior_indices, scene_id)
     crc = zlib.crc32(body) & 0xFFFFFFFF
@@ -408,7 +734,9 @@ def decode_safesync_packet(
     use_cond = bool((flags >> 2) & 0x01)
     is_refresh = bool((flags >> 3) & 0x01)
     mode_zlib = bool((flags >> 4) & 0x01)
-    compact_safe_idx = bool((flags >> 5) & 0x01)
+    safe_flag_arith = bool((flags >> 5) & 0x01)
+    use_range_ranks = bool((flags >> 6) & 0x01)
+    include_risk_bins = bool((flags >> 7) & 0x01)
 
     offset = 0
     if mask_mode == 0:
@@ -433,6 +761,15 @@ def decode_safesync_packet(
         if len(raw_positions) != n_sel:
             raise ValueError("decoded mask count mismatch")
         sel_positions = raw_positions
+    elif mask_mode == 3:
+        alen = struct.unpack("<H", body[offset : offset + 2])[0]
+        offset += 2
+        sel_mask_arr = _decode_mask_2d_arith(body[offset : offset + alen])
+        offset += alen
+        raw_positions = np.flatnonzero(sel_mask_arr).astype(np.int32)
+        if len(raw_positions) != n_sel:
+            raise ValueError("decoded 2D arithmetic mask count mismatch")
+        sel_positions = raw_positions
     else:
         raise ValueError("unknown mask mode")
 
@@ -442,12 +779,14 @@ def decode_safesync_packet(
         if mask_mode == 1:
             safe_positions = np.sort(raw_positions[:n_safe])
             safe_mask[safe_positions] = True
-        elif compact_safe_idx:
-            idx_bits = max(1, int(np.ceil(np.log2(max(2, n_sel)))))
-            n_sidx_bytes = (n_safe * idx_bits + 7) // 8
-            local_sidx = unpack_bits_from_bytes(body[offset : offset + n_sidx_bytes], np.full(n_safe, idx_bits, dtype=np.int32))
-            offset += n_sidx_bytes
-            safe_positions = sel_positions[local_sidx]
+        elif safe_flag_arith:
+            alen_s = body[offset]
+            offset += 1
+            sflags = _decode_safe_flags_arith(body[offset : offset + alen_s], n_sel)
+            offset += alen_s
+            if int(sflags.sum()) != n_safe:
+                raise ValueError("arithmetic safety flag count mismatch")
+            safe_positions = sel_positions[sflags]
             safe_mask[safe_positions] = True
         else:
             n_sflag_bytes = (n_sel + 7) // 8
@@ -457,10 +796,11 @@ def decode_safesync_packet(
                 raise ValueError("safety flag count mismatch")
             safe_positions = sel_positions[sflags]
             safe_mask[safe_positions] = True
-        n_rbin_bytes = (n_safe * 3 + 7) // 8
-        rbins = unpack_bits_from_bytes(body[offset : offset + n_rbin_bytes], np.full(n_safe, 3, dtype=np.int32))
-        offset += n_rbin_bytes
-        risk_bins_full[safe_positions] = rbins
+        if include_risk_bins:
+            n_rbin_bytes = (n_safe * 3 + 7) // 8
+            rbins = unpack_bits_from_bytes(body[offset : offset + n_rbin_bytes], np.full(n_safe, 3, dtype=np.int32))
+            offset += n_rbin_bytes
+            risk_bins_full[safe_positions] = rbins
 
     reconstructed = np.asarray(prior_indices, dtype=np.int32).reshape(1024).copy()
     if n_sel > 0:
@@ -475,7 +815,7 @@ def decode_safesync_packet(
                 mode_raw = body[offset : offset + n_mode_bytes]
                 offset += n_mode_bytes
             use_sp = np.unpackbits(np.frombuffer(mode_raw, dtype=np.uint8))[:n_sel]
-            ranks = _unpack_st_ranks(body[offset:], n_sel)
+            ranks = _unpack_ranks_range(body[offset:], n_sel) if use_range_ranks else _unpack_st_ranks(body[offset:], n_sel)
             offset = len(body)
 
             dec_seen = np.zeros(1024, dtype=bool)
