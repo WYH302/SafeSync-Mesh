@@ -907,36 +907,14 @@ def run_full_system_ablation_and_sensitivity(
         _row("wo_priority_isl_scheduling", "w/o Priority S_safe ISL Relay (FIFO)", "Pillar 3 (Fusion & Relay)", ab["safesync"], ms_fifo),
     ]
 
-    # 4-Axis Sensitivity Study (RKS Bloom bits directly simulated via real BloomFilterRKS!)
-    f_cur = npz_data["f_curr"][:80].astype(np.float32)
-    flat_f = f_cur.reshape(-1, f_cur.shape[-1])
-    rng = np.random.RandomState(42)
+    # 4-Axis Sensitivity Study: 100% REAL RTX 3090 3-seed measured codebook K, rho_safe, alpha + real BloomFilterRKS!
     base_ss = ab["safesync"]
-    base_bpt = round(base_ss["overhead_breakdown_bits"]["token_payload_bits"] / max(1.0, base_ss["mean_selected_tokens"]), 2)
-
-    codebook_sweep = []
-    for k_size, f1_delta, sync_delta, umiss_delta, bpt_scale in [
-        (128, -3.18, -2.94, +4.65, 0.83),
-        (256, -1.22, -1.08, +1.82, 0.91),
-        (512, 0.00, 0.00, 0.00, 1.00),
-        (1024, +0.14, -0.31, +0.88, 1.11),
-    ]:
-        cb = flat_f[rng.choice(len(flat_f), size=k_size, replace=False)]
-        cb_norm2 = np.sum(cb ** 2, axis=1, keepdims=True).T
-        sample_x = flat_f[:4096]
-        dists = np.sum(sample_x ** 2, axis=1, keepdims=True) - 2.0 * (sample_x @ cb.T) + cb_norm2
-        q_mse = float(np.mean(np.min(dists, axis=1)) / sample_x.shape[1])
-        cond_b = round(base_bpt * bpt_scale, 2)
-        codebook_sweep.append({
-            "codebook_size_K": k_size,
-            "unconditional_bits_per_token": int(np.log2(k_size)),
-            "conditional_bits_per_token": cond_b,
-            "quantization_mse": round(max(0.001, q_mse), 4),
-            "rate_kb_per_frame": round(base_ss["rate_kb_per_frame"] + (cond_b - base_bpt) * 0.25, 2),
-            "known_f1": round(base_ss["known_f1"] + f1_delta, 2),
-            "sync_f1": round(base_ss["sync_f1"] + sync_delta, 2),
-            "u_miss": round(max(0.0, base_ss["u_miss"] + umiss_delta), 2),
-        })
+    codebook_sweep = agg.get("real_codebook_size_sweep_3seed")
+    if not codebook_sweep:
+        raise RuntimeError(
+            "Missing real_codebook_size_sweep_3seed in safesync_r36_complete_results.json; "
+            "run run_gpu_supplemental_suite.py first (zero hardcoded deltas allowed!)."
+        )
 
     # Real Bloom-bit sensitivity simulated directly through BloomFilterRKS!
     rks_bits_sweep = []

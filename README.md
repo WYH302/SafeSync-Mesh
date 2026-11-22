@@ -71,8 +71,11 @@ At matched application-layer budget $B_t = 2{,}600\text{ bits}$ (`2.60 kb/frame`
 | *Utility-Only Equal-Codec Control* | *5-Fold CV* | *2.59* | *73.50 ± 1.62* | *71.31 ± 1.26* | *8.94 ± 5.64* | *0.62%* |
 | **SafeSync-Mesh (Ours, Calibrated)** | **5-Fold CV** | **2.59** | **72.79 ± 1.54** | **70.49 ± 1.13** | **5.99 ± 4.31** ($p<0.001$ vs. SOTA; $p=0.022$ vs. Util-EqCodec) | **0.62%** (`0.00%` on 4/5 folds) |
 
-**2025–2026 Module ROI Highlights (`RTX 3090`, $B_t = 2{,}600\text{ bits}$)**:
-- **Quantizer ROI**: Learned `VQ (K=512)` achieves **`70.85%` Sync-F1** (`MSE=0.0170`), decisively outperforming codebook-free `FSQ (8×8×8)` (`58.88%`, `-11.97 pp`, `MSE=0.0466`) and `2-Stage RVQ (2×256)` (`64.07%`, `-6.78 pp`, starved to `144.3` tokens at `12.97 b/tok`).
+**2025–2026 Module ROI, Fading Equal-Codec & Generalization Highlights (`RTX 3090`, 3 Seeds, $B_t = 2{,}600\text{ bits}$)**:
+- **Quantizer & Codebook Size ROI (3-Seed, Fair Adapted $T_\psi$)**: `VQ (K=128)` (`64 KB` SRAM) hits **`71.80%` Sync-F1 / `4.25%` U-Miss** (`412.8` tokens at `4.28 b/tok`), `VQ (K=512)` achieves **`70.36%` Sync-F1** (`MSE=0.0170`, best all-rate balance), outperforming codebook-free `FSQ (8×8×8)` (`69.80%`, `2.74×` higher `MSE=0.0466`) and `2-Stage RVQ (2×256)` (`64.07%`, starved to `144.3` tokens at `12.97 b/tok`).
+- **Physical DVB-S2X Rician Fading (`4 dB SNR`, `K=6 dB`)**: SafeSync-Mesh (`64.90%` Sync-F1, `35.83%` U-Miss) beats even Equal-Codec `Util-EqCodec` (`54.13% / 71.77%`) by **`+10.77 pp` Sync-F1 and `-35.94 pp` U-Miss** via rate-1/2 UEP on $S_{\mathrm{safe}}$.
+- **Full-Scale Official `xbd_test` (`933` Scenes / `955,392` Tokens, Zero Subsampling)**: SafeSync-Mesh achieves **`71.71%` Sync-F1**, **`9.31%` U-Miss**, and the strictly lowest **`0.50%` scene event miss** across all 9 methods (`+6.90 pp` Sync / `-23.65 pp` U-Miss over TWIST; strictly lowest U-Miss on `palu-tsunami`, `mexico-earthquake`, `socal-fire`, and `guatemala-volcano`).
+- **Cross-Backbone Generalization (`SegFormer-B4` / MiT-B4, 3 Seeds)**: SafeSync-Mesh achieves **`54.71%` Sync-F1** (`+5.92 pp` over TWIST) and the strictly lowest **`23.77%` U-Miss** across every baseline—beating even `Util-EqCodec` (`28.49%`, `-4.72 pp`) and `TWIST-EqCodec` (`36.65%`, `-12.88 pp`).
 - **Entropy Framing ROI**: `16-ctx 2D-Arith Mask` cuts mask size by **`38.0%`** vs. `zlib` (`887.0 → 550.1 bits`), adding `+63.1` tokens (`+1.88 pp` Sync-F1, `-3.89 pp` U-Miss); `5-Tier Prefix` captures `97.9%` of adaptive Range/rANS token count (`314.8 vs. 321.7`) with zero sequential error drift under optical ISL bursts.
 
 <p align="center">
@@ -136,7 +139,7 @@ Expected output:
 [PASS] 3-Seed Open-World (2.60 kb/frame): Known-F1=72.32%, Sync-F1=70.36%, U-Miss=13.95%
 [PASS] 5-Fold Cross-Validation (440 xBD pairs): Known-F1=72.79%±1.54%, Sync-F1=70.49%±1.13%, U-Miss=5.99%±4.31%
 [PASS] 24-Sat Walker-Delta ISL Surge (N=200): Completion=99.2%, Constellation Sync-F1=70.42%, Confirm=23.6s
-4 passed
+5 passed
 ```
 
 ---
@@ -146,19 +149,22 @@ Expected output:
 ```text
 SafeSync-Mesh/
 ├── assets/                                   # Publication-ready evaluation figures (PNG)
-├── results/                                  # Verified 3-seed, 5-fold CV, ROI, and 24-sat JSON/MD summaries
+├── results/                                  # Verified 3-seed, 5-fold CV, ROI, S1-S5 & 24-sat JSON/MD summaries
 │   ├── safesync_r36_complete_results.json
 │   ├── five_fold_cv_r36.json
+│   ├── gpu_supplemental_r36.json             # Real 3-seed K sweep, Rician Eq-Codec, 933 xbd_test & SegFormer-B4
 │   └── tables_r36_summary.md
-├── safesync/                                 # Core codec, training, CV, and discrete-event constellation scripts
+├── safesync/                                 # Core codec, training, CV, supplemental & constellation scripts
 │   ├── __init__.py
 │   ├── safesync_wire.py                      # 128-bit 'SSYN' header, 2D-Arith mask, 2D prefix/range VQ codec & CRC32
 │   ├── run_safesync_experiments.py           # 3-seed open-world training, Equal-Codec, Quantizer ROI & SpaceNet 7
 │   ├── run_5fold_cv_study.py                 # 5-fold stratified cross-validation across all 440 xBD pairs
+│   ├── run_gpu_supplemental_suite.py         # 3-seed K=128..1024, Rician Eq-Codec, full 933 xbd_test & SegFormer-B4
+│   ├── extract_extra_gpu_caches.py           # RTX 3090 token extractor for full 933 xbd_test & SegFormer-B4
 │   ├── run_multisat_constellation_study.py   # Discrete-event 24-sat Walker-Delta Keplerian CGR + BloomFilterRKS
 │   └── generate_figures_and_tables.py        # Publication figure & summary table generator
 ├── tests/
-│   └── test_safesync_wire.py                 # Unit tests for wire modes, 2D-Arith, range ranks, RKS Bloom & tables
+│   └── test_safesync_wire.py                 # Unit tests for K=128..1024 wire modes, 2D-Arith, range, RKS & tables
 ├── verify_quickstart.py                      # Out-of-the-box binary wire & result verification suite
 ├── requirements.txt
 └── LICENSE
@@ -168,8 +174,8 @@ SafeSync-Mesh/
 
 ## Reproducibility / 复现说明
 
-- **Datasets**: Publicly available [xBD](https://xview2.org/) (`440` bi-temporal `1024×1024` disaster pairs across 10 hazard events) and [SpaceNet 7](https://spacenet.ai/sn7-challenge/) (`24` multi-month `512×512` urban tracking windows).
-- **Hardware & Compute Ledger**: Experiments were executed on a single **NVIDIA GeForce RTX 3090 GPU** (`24 GB VRAM`, `PyTorch 2.8.0+cu128`, `CUDA 12.8`), with orbital edge profiling on a `15 W` **NVIDIA Jetson Orin NX** (`16 GB`). Total cumulative compute across the full study is **6.88 GPU-hours** (`1.42 h` backbone feature extraction, `3.48 h` 3-seed multi-method training, `0.04 h` / `157.3 s` 5-fold stratified cross-validation, and `1.94 h` rate sweeps, 9-variant ablations, sensitivity grids, and discrete-event 24-satellite constellation simulations; reproducing the complete 3-seed suite from cached tokens finishes in `995.8 s` / `0.28 GPU-h`).
+- **Datasets**: Publicly available [xBD](https://xview2.org/) (`440` bi-temporal `1024×1024` disaster pairs across 10 hazard events + full official `933`-scene `xbd_test` release totaling `955,392` tokens) and [SpaceNet 7](https://spacenet.ai/sn7-challenge/) (`24` multi-month `512×512` urban tracking windows).
+- **Hardware & Compute Ledger**: Experiments were executed on a single **NVIDIA GeForce RTX 3090 GPU** (`24 GB VRAM`, `PyTorch 2.8.0+cu128`, `CUDA 12.8`), with orbital edge profiling on a `15 W` **NVIDIA Jetson Orin NX** (`16 GB`). Total cumulative compute across the full study is **8.83 GPU-hours** (`2.44 h` Swin-T, full `933`-scene `xbd_test`, SegFormer-B4, and VGG16-UNet extraction; `3.48 h` 3-seed multi-method training; `0.04 h` / `157.3 s` 5-fold stratified cross-validation; and `2.87 h` rate sweeps, 9-variant ablations, 3-seed S1–S5 supplemental studies, and discrete-event 24-satellite constellation simulations).
 - **Full Re-run**: Once cached token tensors (`xbd_openworld_features_440.npz` and `sn7_bottleneck_tokens.npz`) are placed under `data_cache/`, run:
   ```bash
   python -m safesync.run_safesync_experiments

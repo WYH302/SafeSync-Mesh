@@ -266,10 +266,10 @@ def _decode_safe_flags_arith(buf: bytes, n_sel: int) -> np.ndarray:
     return np.array(fl, dtype=bool)
 
 
-def _pack_ranks_range(ranks: list[int]) -> bytes:
-    """Adaptive 6-tier range coder (rANS-equivalent entropy efficiency) for ranks in {0..511}.
+def _pack_ranks_range(ranks: list[int], raw_bits: int = 9) -> bytes:
+    """Adaptive 6-tier range coder (rANS-equivalent entropy efficiency) for ranks in {0..K-1}.
 
-    Tiers: 0 -> {0} (0b), 1 -> {1..4} (2b), 2 -> {5..20} (4b), 3 -> {21..84} (6b), 4 -> {85..212} (7b), 5 -> {213..511} (9b).
+    Tiers: 0 -> {0} (0b), 1 -> {1..4} (2b), 2 -> {5..20} (4b), 3 -> {21..84} (6b), 4 -> {85..212} (7b), 5 -> escape (raw_bits).
     Tier symbols are adaptively range-coded; exact sub-rank offsets are bit-packed losslessly.
     """
     if not ranks:
@@ -292,12 +292,12 @@ def _pack_ranks_range(ranks: list[int]) -> bytes:
         elif r <= 84:
             t = 3
             sub_lens.append(6); sub_vals.append(r - 21)
-        elif r <= 212:
+        elif r <= 212 and raw_bits >= 8:
             t = 4
             sub_lens.append(7); sub_vals.append(r - 85)
         else:
             t = 5
-            sub_lens.append(9); sub_vals.append(r)
+            sub_lens.append(raw_bits); sub_vals.append(r)
         tot = sum(counts)
         cum = sum(counts[:t])
         rng = hi - lo + 1
@@ -317,7 +317,7 @@ def _pack_ranks_range(ranks: list[int]) -> bytes:
     return struct.pack("<H", len(tier_out)) + bytes(tier_out) + sub_bytes
 
 
-def _unpack_ranks_range(buf: bytes, n_sel: int) -> list[int]:
+def _unpack_ranks_range(buf: bytes, n_sel: int, raw_bits: int = 9) -> list[int]:
     """Exact bit-for-bit inverse of _pack_ranks_range."""
     if n_sel == 0:
         return []
@@ -361,7 +361,7 @@ def _unpack_ranks_range(buf: bytes, n_sel: int) -> list[int]:
         elif chosen_t == 4:
             sub_lens.append(7)
         elif chosen_t == 5:
-            sub_lens.append(9)
+            sub_lens.append(raw_bits)
         lo, hi = chosen_lo, chosen_hi
         counts[chosen_t] += 3
         if sum(counts) > 1024:
@@ -391,17 +391,18 @@ def _unpack_ranks_range(buf: bytes, n_sel: int) -> list[int]:
     return ranks
 
 
-def _pack_st_ranks(ranks: list[int]) -> bytes:
-    """Pack ranks in {0..511} with Kraft-tight instantaneous prefix code (LSB-first):
+def _pack_st_ranks(ranks: list[int], raw_bits: int = 9) -> bytes:
+    """Pack ranks in {0..K-1} with Kraft-tight instantaneous prefix code (LSB-first):
       - r == 0:        '0'           (1 bit)
       - 1 <= r <= 4:   '1','0' + 2b  (4 bits)
       - 5 <= r <= 20:  '1','1','0' + 4b (7 bits)
       - 21 <= r <= 84: '1','1','1','0' + 6b (10 bits)
-      - 85 <= r <= 511:'1','1','1','1' + 9b (13 bits)
+      - r >= 85:       '1','1','1','1' + raw_bits (4 + raw_bits)
     """
     acc = 0
     nbits = 0
     out = bytearray()
+    esc_len = 4 + int(raw_bits)
     for r in ranks:
         if r == 0:
             # bit 0 -> 0
@@ -419,9 +420,9 @@ def _pack_st_ranks(ranks: list[int]) -> bytes:
             acc |= (0b0111 | ((r - 21) << 4)) << nbits
             nbits += 10
         else:
-            # bits: 1, 1, 1, 1, r[0:9] -> value = 0b1111 | (r << 4)
+            # bits: 1, 1, 1, 1, r[0:raw_bits] -> value = 0b1111 | (r << 4)
             acc |= (0b1111 | (r << 4)) << nbits
-            nbits += 13
+            nbits += esc_len
         while nbits >= 8:
             out.append(acc & 0xFF)
             acc >>= 8
@@ -431,13 +432,15 @@ def _pack_st_ranks(ranks: list[int]) -> bytes:
     return bytes(out)
 
 
-def _unpack_st_ranks(buf: bytes, n_sel: int) -> list[int]:
-    """Decode n_sel instantaneously prefix-coded ranks in {0..511}."""
+def _unpack_st_ranks(buf: bytes, n_sel: int, raw_bits: int = 9) -> list[int]:
+    """Decode n_sel instantaneously prefix-coded ranks in {0..K-1}."""
     acc = 0
     nbits = 0
     byte_idx = 0
     buf_len = len(buf)
     ranks: list[int] = []
+    rb = int(raw_bits)
+    rmask = (1 << rb) - 1
 
     def _ensure(k: int) -> None:
         nonlocal acc, nbits, byte_idx
@@ -479,10 +482,10 @@ def _unpack_st_ranks(buf: bytes, n_sel: int) -> list[int]:
             nbits -= 6
             ranks.append(v + 21)
         else:
-            _ensure(9)
-            v = acc & 0x1FF
-            acc >>= 9
-            nbits -= 9
+            _ensure(rb)
+            v = acc & rmask
+            acc >>= rb
+            nbits -= rb
             ranks.append(v)
     return ranks
 
@@ -502,6 +505,7 @@ class ConditionalTokenEntropyCodec:
         spatial_counts: np.ndarray | None = None,
     ):
         self.K, self.d = codebook.shape
+        self.raw_bits = max(1, (int(self.K) - 1).bit_length())
         self.codebook = codebook.astype(np.float32)
         dists = np.linalg.norm(self.codebook[:, None, :] - self.codebook[None, :, :], axis=-1)
         dists_norm = dists / (float(np.median(dists)) + 1e-5)
@@ -531,17 +535,18 @@ class ConditionalTokenEntropyCodec:
         prior_idx = np.asarray(prior_idx, dtype=np.int32)
         target_idx = np.asarray(target_idx, dtype=np.int32)
         if not use_conditional:
-            return np.full(prior_idx.shape, 9, dtype=np.int32)
+            return np.full(prior_idx.shape, self.raw_bits, dtype=np.int32)
         ranks = self.rank_table[prior_idx, target_idx]
+        esc_bits = 4 + self.raw_bits
         return np.where(
-            ranks == 0, 1, np.where(ranks <= 4, 4, np.where(ranks <= 20, 7, np.where(ranks <= 84, 10, 13)))
+            ranks == 0, 1, np.where(ranks <= 4, 4, np.where(ranks <= 20, 7, np.where(ranks <= 84, 10, esc_bits)))
         ).astype(np.int32)
 
     def expected_bit_cost(self, prior_idx: np.ndarray, c_k: np.ndarray, use_conditional: bool = True) -> np.ndarray:
         """Expected bit cost b_k used by the online allocator before entropy coding."""
         if not use_conditional:
-            return np.full(c_k.shape, 9.0, dtype=np.float32)
-        return np.full(c_k.shape, 5.85, dtype=np.float32)
+            return np.full(c_k.shape, float(self.raw_bits), dtype=np.float32)
+        return np.full(c_k.shape, float(5.85 * (self.raw_bits / 9.0)), dtype=np.float32)
 
     def encode_tokens(
         self, prior_idx: np.ndarray, target_idx: np.ndarray, use_conditional: bool = True
@@ -549,7 +554,7 @@ class ConditionalTokenEntropyCodec:
         prior_idx = np.asarray(prior_idx, dtype=np.int32)
         target_idx = np.asarray(target_idx, dtype=np.int32)
         if not use_conditional:
-            bit_lengths = np.full(len(target_idx), 9, dtype=np.int32)
+            bit_lengths = np.full(len(target_idx), self.raw_bits, dtype=np.int32)
             return pack_bits_to_bytes(bit_lengths, target_idx), bit_lengths
         ranks = self.rank_table[prior_idx, target_idx]
         bit_lengths = self.token_bit_cost(prior_idx, target_idx, use_conditional=True)
@@ -673,10 +678,14 @@ def encode_safesync_packet(
                 mode_bytes = struct.pack("<H", len(mode_z)) + mode_z
             else:
                 mode_bytes = mode_raw
-            rank_bytes = _pack_ranks_range(ranks_list) if use_range_ranks else _pack_st_ranks(ranks_list)
+            rank_bytes = (
+                _pack_ranks_range(ranks_list, raw_bits=codec.raw_bits)
+                if use_range_ranks
+                else _pack_st_ranks(ranks_list, raw_bits=codec.raw_bits)
+            )
             token_bytes = mode_bytes + rank_bytes
         else:
-            token_bytes = pack_bits_to_bytes(np.full(n_sel, 9, dtype=np.int32), tgt_flat[sel_positions])
+            token_bytes = pack_bits_to_bytes(np.full(n_sel, codec.raw_bits, dtype=np.int32), tgt_flat[sel_positions])
     else:
         token_bytes = b""
 
@@ -815,7 +824,11 @@ def decode_safesync_packet(
                 mode_raw = body[offset : offset + n_mode_bytes]
                 offset += n_mode_bytes
             use_sp = np.unpackbits(np.frombuffer(mode_raw, dtype=np.uint8))[:n_sel]
-            ranks = _unpack_ranks_range(body[offset:], n_sel) if use_range_ranks else _unpack_st_ranks(body[offset:], n_sel)
+            ranks = (
+                _unpack_ranks_range(body[offset:], n_sel, raw_bits=codec.raw_bits)
+                if use_range_ranks
+                else _unpack_st_ranks(body[offset:], n_sel, raw_bits=codec.raw_bits)
+            )
             offset = len(body)
 
             dec_seen = np.zeros(1024, dtype=bool)
@@ -839,8 +852,8 @@ def decode_safesync_packet(
                 reconstructed[pos] = tgt_k
                 dec_seen[pos] = True
         else:
-            n_tok_bytes = (n_sel * 9 + 7) // 8
-            tgt_sel = unpack_bits_from_bytes(body[offset : offset + n_tok_bytes], np.full(n_sel, 9, dtype=np.int32))
+            n_tok_bytes = (n_sel * codec.raw_bits + 7) // 8
+            tgt_sel = unpack_bits_from_bytes(body[offset : offset + n_tok_bytes], np.full(n_sel, codec.raw_bits, dtype=np.int32))
             offset += n_tok_bytes
             reconstructed[sel_positions] = tgt_sel
 

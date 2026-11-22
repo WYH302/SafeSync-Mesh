@@ -894,6 +894,7 @@ def plot_fig5_overhead_and_channel(res: Dict) -> None:
     ch_sorted = sorted(ch, key=lambda item: item["rician_snr_db"])
     snrs = [c["rician_snr_db"] for c in ch_sorted]
     ss_f1 = [c["safesync"]["sync_f1"] for c in ch_sorted]
+    ueq_f1 = [c["stateful_utility_equal_codec"]["sync_f1"] for c in ch_sorted] if "stateful_utility_equal_codec" in ch_sorted[0] else None
     tw_f1 = [c["twist_inspired"]["sync_f1"] for c in ch_sorted]
     ut_f1 = [c["stateful_utility_only"]["sync_f1"] for c in ch_sorted]
     st_f1 = [c["stars_adapted"]["sync_f1"] for c in ch_sorted]
@@ -901,27 +902,29 @@ def plot_fig5_overhead_and_channel(res: Dict) -> None:
 
     ax2 = axes[1]
     p1 = ax2.plot(snrs, ss_f1, color="#0072B2", marker="o", linestyle="-", linewidth=1.45, label="SafeSync", zorder=10)
-    p2 = ax2.plot(snrs, ut_f1, color="#009E73", marker="^", linestyle="-.", linewidth=1.05, label="Util-only", zorder=6)
-    p3 = ax2.plot(snrs, tw_f1, color="#D55E00", marker="s", linestyle="--", linewidth=1.05, label="TWIST", zorder=6)
+    peq = ax2.plot(snrs, ueq_f1, color="#8B5CF6", marker="D", linestyle="-.", linewidth=1.05, label="Util-Eq", zorder=8) if ueq_f1 else []
+    p2 = ax2.plot(snrs, ut_f1, color="#009E73", marker="^", linestyle="-.", linewidth=1.00, label="Util-only", zorder=6)
+    p3 = ax2.plot(snrs, tw_f1, color="#D55E00", marker="s", linestyle="--", linewidth=1.00, label="TWIST", zorder=6)
     p4 = ax2.plot(snrs, st_f1, color="#E69F00", marker="v", linestyle="--", linewidth=0.95, label="STARS", zorder=5)
     p5 = ax2.plot(snrs, tk_f1, color="#56B4E9", marker="P", linestyle=":", linewidth=0.95, label="Top-K", zorder=5)
 
-    gain_4db = ss_f1[0] - max(tw_f1[0], ut_f1[0])
+    gain_4db = (ss_f1[0] - ueq_f1[0]) if ueq_f1 else (ss_f1[0] - max(tw_f1[0], ut_f1[0]))
+    ann_txt = f"+{gain_4db:.1f} pp vs Util-Eq @ 4 dB" if ueq_f1 else f"+{gain_4db:.1f} pp @ 4 dB"
     ax2.annotate(
-        f"+{gain_4db:.1f} pp @ 4 dB",
+        ann_txt,
         xy=(snrs[0], ss_f1[0]),
-        xytext=(snrs[0] + 2.4, max(ss_f1) + 7.2),
+        xytext=(snrs[0] + 1.4, max(ss_f1) + 7.4),
         arrowprops=dict(arrowstyle="->", color="#0072B2", lw=0.9, connectionstyle="arc3,rad=0.14"),
-        fontsize=5.8, fontweight="bold", color="#0072B2",
+        fontsize=5.5, fontweight="bold", color="#0072B2",
         bbox=dict(boxstyle="round,pad=0.14", fc="#F0F9FF", ec="#0072B2", lw=0.65),
     )
 
     ax2.set_xticks(snrs)
     ax2.set_xlabel("Rician SNR (dB) ($K=6$ dB)")
     ax2.set_ylabel("Open-World Sync-F1 (%) $\\uparrow$", color="#0F172A")
-    ax2.set_ylim(max(14, min(tk_f1) - 4), max(ss_f1) + 15.0)
-    hb2 = p1 + p2 + p3 + p4 + p5
-    add_band_legend(fig, hb2, [item.get_label() for item in hb2], x_centers[1], ncol=3, fontsize=5.7, colspacing=0.42, handlelength=1.1)
+    ax2.set_ylim(max(12, min(tk_f1) - 4), max(ss_f1) + 15.5)
+    hb2 = p1 + peq + p2 + p3 + p4 + p5
+    add_band_legend(fig, hb2, [item.get_label() for item in hb2], x_centers[1], ncol=3, fontsize=5.5, colspacing=0.38, handlelength=1.05)
 
     # Panel (c)
     ax3 = axes[2]

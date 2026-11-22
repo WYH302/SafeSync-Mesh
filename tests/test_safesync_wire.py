@@ -69,5 +69,23 @@ def test_bloom_filter_rks_no_false_negatives() -> None:
         assert bf.maybe_contains(rid), f"Bloom filter false negative on {rid}"
 
 
+def test_arbitrary_codebook_sizes_bit_exact() -> None:
+    rng = np.random.default_rng(2026)
+    for k_size in (128, 256, 512, 1024):
+        cb = rng.standard_normal((k_size, 64), dtype=np.float32)
+        codec = ConditionalTokenEntropyCodec(cb)
+        pri = rng.integers(0, k_size, size=1024, dtype=np.int32)
+        cur = rng.integers(0, k_size, size=1024, dtype=np.int32)
+        sel = rng.random(1024) < 0.30
+        safe = sel & (rng.random(1024) < 0.15)
+        risk = rng.random(1024).astype(np.float32)
+        for uc in (True, False):
+            enc = encode_safesync_packet(f"k_{k_size}", pri, cur, sel, safe, risk, codec, use_conditional_entropy=uc)
+            dec = decode_safesync_packet(enc["packet"], f"k_{k_size}", pri, codec)
+            assert np.array_equal(dec["selected_mask"], sel)
+            assert np.array_equal(dec["safety_mask"], safe)
+            assert np.array_equal(dec["reconstructed_indices"][sel], cur[sel])
+
+
 def test_published_result_tables() -> None:
     verify_published_tables()
