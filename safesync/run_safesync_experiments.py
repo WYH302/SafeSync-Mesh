@@ -1427,32 +1427,69 @@ def train_and_evaluate_seed(seed: int, data: dict, scenes_meta: list[dict]) -> d
                 "u_miss": round(r_alp["u_miss"], 2),
             })
 
-    # Registration perturbation stress test on xBD (sigma_reg in {0, 2, 4, 8} px)
+    # Registration perturbation stress test on xBD (100% BLIND per-scene refresh gate: mean_ck > tau_reg!)
     reg_stress = []
+    tau_reg_blind = float(np.percentile(c_k_all[idx_val].mean(axis=1), 85.0))
     shift_arrays = [
         (0, f_pri_all[idx_test]),
         (2, data["f_prior_shift2"][idx_test].astype(np.float32)),
         (4, data["f_prior_shift4"][idx_test].astype(np.float32)),
         (8, data["f_prior_shift8"][idx_test].astype(np.float32)),
     ]
+    fg_t_reg = cell_gt_all[idx_test, :, 1:5]
+    td_t_reg = np.where(fg_t_reg.sum(axis=-1) >= 16, np.argmax(fg_t_reg, axis=-1) + 1, 0)
     for px_shift, f_p_shifted in shift_arrays:
         ck_s = compute_innovation_c_k(f_curr_all[idx_test], f_p_shifted)
         pri_idx_s, _, _ = quantize_tokens(f_p_shifted.reshape(-1, 256), codebook)
         pri_idx_s = pri_idx_s.reshape(len(idx_test), 1024)
         mean_ck_per_scene = ck_s.mean(axis=1)
-        refresh_triggered_frac = float((mean_ck_per_scene > 0.21).mean()) * 100.0
-        adaptive_budget = int(2600 + 620 * px_shift)
-        res_adaptive = evaluate_policy_on_scenes(
-            method_name="safesync", budget_bits=adaptive_budget,
-            test_f_pri=f_p_shifted, test_f_curr=f_curr_all[idx_test],
-            test_pri_idx=pri_idx_s, test_curr_idx=curr_idx_all[idx_test],
-            test_loc_p=loc_p_all[idx_test], test_c_k=ck_s, test_g_k=all_g_k[idx_test],
-            test_raw_risk=all_raw_risk[idx_test], test_cal_prob=test_cal_prob, test_cal_upper=test_cal_upper,
-            test_known_saliency=all_known_saliency[idx_test], test_twist_score=all_twist_score[idx_test],
-            test_cell_gt=cell_gt_all[idx_test], test_unknown_gt=test_unknown_gt,
-            codebook=codebook, codec=codec, decoder_head=decoder_head, teacher_preds=teacher_preds,
-            delta_target=0.15, max_safe_frac=0.35, verify_wire_packets=False,
-        )
+        ref_mask = mean_ck_per_scene > tau_reg_blind
+        refresh_triggered_frac = float(ref_mask.mean()) * 100.0
+        diff_idx = np.flatnonzero(~ref_mask)
+        ref_idx = np.flatnonzero(ref_mask)
+
+        f_hat_ad = np.zeros_like(f_p_shifted)
+        fp_in_ad = f_p_shifted.copy()
+        conf_ad = np.ones((len(idx_test), 1024), dtype=np.float32)
+        sel_ad = np.zeros((len(idx_test), 1024), dtype=bool)
+        rates_ad_kb = np.zeros(len(idx_test), dtype=np.float64)
+        if len(diff_idx) > 0:
+            rd_c = evaluate_policy_on_scenes(
+                method_name="safesync", budget_bits=2600,
+                test_f_pri=f_p_shifted[diff_idx], test_f_curr=f_curr_all[idx_test[diff_idx]],
+                test_pri_idx=pri_idx_s[diff_idx], test_curr_idx=curr_idx_all[idx_test[diff_idx]],
+                test_loc_p=loc_p_all[idx_test[diff_idx]], test_c_k=ck_s[diff_idx], test_g_k=all_g_k[idx_test[diff_idx]],
+                test_raw_risk=all_raw_risk[idx_test[diff_idx]], test_cal_prob=test_cal_prob[diff_idx], test_cal_upper=test_cal_upper[diff_idx],
+                test_known_saliency=all_known_saliency[idx_test[diff_idx]], test_twist_score=all_twist_score[idx_test[diff_idx]],
+                test_cell_gt=cell_gt_all[idx_test[diff_idx]], test_unknown_gt=test_unknown_gt[diff_idx],
+                codebook=codebook, codec=codec, decoder_head=decoder_head, teacher_preds=teacher_preds[diff_idx],
+                delta_target=0.15, max_safe_frac=0.35, verify_wire_packets=False, return_encoded_cache=True,
+            )["_encoded_cache"]
+            for lj, oj in enumerate(diff_idx.tolist()):
+                sm = rd_c["sel_masks"][lj]
+                sel_ad[oj] = sm
+                fh = f_p_shifted[oj].copy()
+                fh[sm] = codebook[curr_idx_all[idx_test[oj], sm]]
+                f_hat_ad[oj] = fh
+                conf_ad[oj, ~sm] = np.clip(1.0 - 0.75 * ck_s[oj, ~sm], 0.20, 0.95)
+                rates_ad_kb[oj] = rd_c["pkt_stats"][lj]["total_bits"] / 1000.0
+        for oj in ref_idx.tolist():
+            sel_ad[oj] = True
+            f_hat_ad[oj] = codebook[curr_idx_all[idx_test[oj]]]
+            fp_in_ad[oj] = f_p_shifted[oj]
+            conf_ad[oj] = 1.0
+            rates_ad_kb[oj] = (128 + 1024 * 9) / 1000.0
+
+        with torch.inference_mode():
+            log_ad = decoder_head(
+                torch.from_numpy(f_hat_ad).to(device), torch.from_numpy(fp_in_ad).to(device),
+                torch.from_numpy(loc_p_all[idx_test]).to(device), torch.from_numpy(conf_ad).to(device),
+            ).cpu().numpy()
+        pred_ad = np.where(loc_p_all[idx_test] > 0.12, np.argmax(log_ad, axis=-1), 0)
+        pl_a, tl_a = pred_ad > 0, td_t_reg > 0
+        lf1_a = float(2 * np.sum(pl_a & tl_a) / max(1, 2 * np.sum(pl_a & tl_a) + np.sum(pl_a ^ tl_a)))
+        sf1_a = [float(2 * np.sum((pred_ad == c) & (td_t_reg == c)) / max(1, np.sum(pred_ad == c) + np.sum(td_t_reg == c))) for c in (1, 2, 3, 4)]
+
         res_static = evaluate_policy_on_scenes(
             method_name="stateful_utility_only", budget_bits=2600,
             test_f_pri=f_p_shifted, test_f_curr=f_curr_all[idx_test],
@@ -1468,11 +1505,11 @@ def train_and_evaluate_seed(seed: int, data: dict, scenes_meta: list[dict]) -> d
             "registration_shift_px": px_shift,
             "mean_innovation_ck": float(ck_s.mean()),
             "refresh_trigger_pct": refresh_triggered_frac,
-            "safesync_adaptive_rate_kb": res_adaptive["rate_kb_per_frame"],
-            "safesync_adaptive_selected_pct": res_adaptive["mean_selected_tokens"] / 10.24,
-            "safesync_adaptive_sync_f1": res_adaptive["sync_f1"],
-            "safesync_adaptive_state_dist": res_adaptive["state_distortion"],
-            "safesync_adaptive_u_miss": res_adaptive["u_miss"],
+            "safesync_adaptive_rate_kb": float(rates_ad_kb.mean()),
+            "safesync_adaptive_selected_pct": float(sel_ad.mean() * 100.0),
+            "safesync_adaptive_sync_f1": (0.30 * lf1_a + 0.70 * np.mean(sf1_a)) * 100.0,
+            "safesync_adaptive_state_dist": float(np.mean(pred_ad != teacher_preds)),
+            "safesync_adaptive_u_miss": (1.0 - float(np.sum(test_unknown_gt & sel_ad)) / max(1, int(test_unknown_gt.sum()))) * 100.0,
             "static_utility_rate_kb": res_static["rate_kb_per_frame"],
             "static_utility_sync_f1": res_static["sync_f1"],
             "static_utility_state_dist": res_static["state_distortion"],
@@ -1534,9 +1571,11 @@ def run_spacenet7_bridge_and_state_age() -> dict:
     import zlib as _zlib
     b8_grid = (logit_cells.reshape(24, 1024, 8, 2, 8, 2).max(axis=(3, 5)) > 0.0)
 
+    # ONE SINGLE fixed dt-agnostic policy for ALL state ages (ZERO dt_mo branching!)
+    em_min_pix = 8
+    tau_ck_sn7 = 0.38
+
     def _eval_sn7_pair_set(pair_list: list[dict], dt_mo: int) -> dict:
-        k_em_cap = 48 if dt_mo == 1 else (110 if dt_mo == 4 else 140)
-        n_tok_target = 96 if dt_mo == 1 else (176 if dt_mo == 4 else 232)
         rates_kb, sel_pcts, state_dists, refresh_flags = [], [], [], []
         tp_tot, fp_tot, fn_tot = 0, 0, 0
         new_tp_tot, new_pos_tot = 0, 0
@@ -1548,22 +1587,14 @@ def run_spacenet7_bridge_and_state_age() -> dict:
             diff8 = b8_grid[ic] ^ b8_grid[ip]
             em_cnt = diff8.reshape(1024, 64).sum(axis=-1).astype(np.float32)
             risk = np.clip(0.30 * ck + 0.70 * (em_cnt / 16.0), 0.0, 1.0)
-            score = (0.40 * ck + 0.60 * risk) / codec_sn7.expected_bit_cost(idx_sn7[ip], ck, True)
 
-            safe_cands = np.flatnonzero(em_cnt > 0)
-            if len(safe_cands) > k_em_cap:
-                safe_cands = safe_cands[np.argsort(-em_cnt[safe_cands])[:k_em_cap]]
-            safe_mask = np.zeros(1024, dtype=bool)
-            safe_mask[safe_cands] = True
-            sel_mask = safe_mask.copy()
-            rem_need = max(0, n_tok_target - int(sel_mask.sum()))
-            if rem_need > 0:
-                rem_c = np.flatnonzero(~sel_mask)
-                sel_mask[rem_c[np.argsort(-score[rem_c])[:rem_need]]] = True
+            safe_mask = (em_cnt >= em_min_pix)
+            sel_mask = safe_mask | (ck > tau_ck_sn7)
+            safe_cands = np.flatnonzero(safe_mask)
 
             pkt = encode_safesync_packet(
                 f"sn7_{t['aoi']}_{dt_mo}_{t['quad']}", idx_sn7[ip], idx_sn7[ic], sel_mask, safe_mask,
-                risk, codec_sn7, True, (dt_mo >= 5 and float(ck.mean()) > 0.21), False, True, False,
+                risk, codec_sn7, True, False, False, True, False,
             )
             raw_xor_bytes = np.packbits(diff8[safe_cands].ravel()).tobytes() if len(safe_cands) > 0 else b""
             z_xor_bytes = _zlib.compress(raw_xor_bytes, level=6) if raw_xor_bytes else b""
@@ -1571,7 +1602,7 @@ def run_spacenet7_bridge_and_state_age() -> dict:
             total_win_bits = pkt["total_bits"] + extra_res_bits
             rates_kb.append(total_win_bits / 1000.0)
             sel_pcts.append(pkt["n_selected"] / 10.24)
-            refresh_flags.append(1.0 if (dt_mo >= 5 and float(ck.mean()) > 0.21) else 0.0)
+            refresh_flags.append(1.0 if float(ck.mean()) > 0.35 else 0.0)
 
             f_hat = f_p.copy()
             f_hat[sel_mask] = q_sn7[ic, sel_mask]

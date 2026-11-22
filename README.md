@@ -28,7 +28,7 @@ When agile Earth-observation (EO) satellites cooperate with Starlink-like low-Ea
 ### Method Summary
 
 **SafeSync-Mesh** models cooperative multi-satellite dissemination as a distributed orbital epistemic state machine:
-- **Stage-2 Bottleneck Vector Quantization (`32×32`, `K=512`), 2D-Arith Mask & 2D Causal Spatio-Temporal Prefix Coding**: Replaces multi-skip floating-point feature dumps with compact discrete bottleneck indices (`36,012×` smaller than 5-skip FP16 on SpaceNet 7), a wire-only 2D `3×3` depthwise-separable refinement head, a **16-context 2D causal binary arithmetic spatial mask** (`550.1 bits`, `-38.0%` vs. `zlib`), lossless 2-context adaptive arithmetic $S_{\mathrm{safe}}$ flags (`102.4 bits`), and 2D causal spatio-temporal conditional prefix coding (`5.77 bits/token`, packing `314.8` tokens per `325-byte` CRC32-protected frame).
+- **Stage-2 Bottleneck Vector Quantization (`32×32`, `K=512`), 2D-Arith Mask & 2D Causal Spatio-Temporal Prefix Coding**: Replaces multi-skip floating-point feature dumps with compact discrete bottleneck indices (`26,440×` smaller than 5-skip FP16 on SpaceNet 7 under a single blind $\Delta t$-agnostic gate, reaching `51.15%` new-building recall), a wire-only 2D `3×3` depthwise-separable refinement head, a **16-context 2D causal binary arithmetic spatial mask** (`550.1 bits`, `-38.0%` vs. `zlib`), lossless 2-context adaptive arithmetic $S_{\mathrm{safe}}$ flags (`102.4 bits`), and 2D causal spatio-temporal conditional prefix coding (`5.77 bits/token`, packing `314.8` tokens per `325-byte` CRC32-protected frame).
 - **Orthogonal Utility–Risk Decomposition & Epistemic Safety Valve ($S_{\mathrm{safe}}$)**: Separates closed-set marginal utility $g_k$ from 2-fold out-of-sample isotonic-conformal calibrated open-world risk $p_k$, reserving budget for high-risk anomalies until omitted risk satisfies $\sum_{s_k=0} p_k \le \delta$ (**Proposition 1**).
 - **64-Bit Recipient Knowledge Sketch (RKS) & Idempotent State Algebra**: Exchanges a 64-bit control sketch (exact bit-level `32-bit` two-hash Bloom filter + `16-bit` prior digest + `16-bit` age vector) and persistent 32-bit `root_id` provenance tags so multi-path arrivals fuse idempotently ($M_j \oplus e \oplus \cdots \oplus e = M_j \oplus e$, $\Delta q_{\mathrm{infl}} = 0$, **Proposition 2**).
 
@@ -41,7 +41,7 @@ When agile Earth-observation (EO) satellites cooperate with Starlink-like low-Ea
 ### 研究背景与核心设计
 
 围绕低轨多星协同应急观测中的三大瓶颈——**多跳跃连续特征膨胀**、**闭集先验幻觉（Closed-Set Prior Hallucination）** 与 **多径回声置信度虚高及先验版本漂移**，**SafeSync-Mesh** 将多星协同分发建模为分布式的**在轨认知状态机**：
-- **瓶颈层离散向量量化与 2D-Arith / 时空条件前缀编码**：用 `32×32` 瓶颈层离散码本（`K=512`）替代动辄数十 MB 的跳跃连接张量（SpaceNet 7 压缩达 **`36,012×`**），并采用 **16 上下文二维因果二元算术空间掩码**（较 `zlib` 节省 **`38.0%`** 掩码开销）、无损 2 上下文算术安全标记与二维因果时空条件前缀编码（`5.77 bits/token`），在严格 `325 字节/帧`（`2.60 kb/frame`，含 128-bit 帧头与 CRC32）内封装 `314.8` 枚离散令牌。
+- **瓶颈层离散向量量化与 2D-Arith / 时空条件前缀编码**：用 `32×32` 瓶颈层离散码本（`K=512`）替代动辄数十 MB 的跳跃连接张量（SpaceNet 7 统一无先验时间跨度门控下压缩达 **`26,440×`**，新增建筑召回率达 **`51.15%`**），并采用 **16 上下文二维因果二元算术空间掩码**（较 `zlib` 节省 **`38.0%`** 掩码开销）、无损 2 上下文算术安全标记与二维因果时空条件前缀编码（`5.77 bits/token`），在严格 `325 字节/帧`（`2.60 kb/frame`，含 128-bit 帧头与 CRC32）内封装 `314.8` 枚离散令牌。
 - **效用—风险正交分解与认知安全阀（$S_{\mathrm{safe}}$）**：将常规闭集边际效用 $g_k$ 与严格样本外（2-Fold Out-of-Sample）保序回归—共形校准后的开放世界风险 $p_k$ 解耦，给出无后处理截断的 **Proposition 1** 漏检概率上界保障。
 - **64-bit 接收端知识草图（RKS）与溯源幂等状态代数**：借助 64-bit RKS（精确 32-bit 双哈希 Bloom 过滤器 + 16-bit 先验摘要 + 16-bit 鲜度向量）与持久化 `root_id`，在中间中继星以 `0.18 ms`（$\mathcal{O}(1)$）压制多径重复转发至 `0.3%`，并严格满足多路径融合幂等律（$\Delta q_{\mathrm{infl}} = 0$，**Proposition 2**）。
 
@@ -76,6 +76,7 @@ At matched application-layer budget $B_t = 2{,}600\text{ bits}$ (`2.60 kb/frame`
 - **Physical DVB-S2X Rician Fading (`4 dB SNR`, `K=6 dB`)**: SafeSync-Mesh (`64.90%` Sync-F1, `35.83%` U-Miss) beats even Equal-Codec `Util-EqCodec` (`54.13% / 71.77%`) by **`+10.77 pp` Sync-F1 and `-35.94 pp` U-Miss** via rate-1/2 UEP on $S_{\mathrm{safe}}$.
 - **Full-Scale Official `xbd_test` (`933` Scenes / `955,392` Tokens, Zero Subsampling)**: SafeSync-Mesh achieves **`71.71%` Sync-F1**, **`9.31%` U-Miss**, and the strictly lowest **`0.50%` scene event miss** across all 9 methods (`+6.90 pp` Sync / `-23.65 pp` U-Miss over TWIST; strictly lowest U-Miss on `palu-tsunami`, `mexico-earthquake`, `socal-fire`, and `guatemala-volcano`).
 - **Cross-Backbone Generalization (`SegFormer-B4` / MiT-B4, 3 Seeds)**: SafeSync-Mesh achieves **`54.71%` Sync-F1** (`+5.92 pp` over TWIST) and the strictly lowest **`23.77%` U-Miss** across every baseline—beating even `Util-EqCodec` (`28.49%`, `-4.72 pp`) and `TWIST-EqCodec` (`36.65%`, `-12.88 pp`).
+- **True `1024×1024` RGB Misregistration Stress (`{0, 2, 4, 8, 16}` px, 3 Seeds, 100% Blind Gate)**: Disaster-invariant positive footprint excess gate ($d_{\mathrm{reg}}^+ > \tau_{\mathrm{reg}} = 0.1065$, calibrated strictly on clean `Val-Proxy`, zero knowledge of shift magnitude) scales refresh frequency blindly from `9.0%` (`3.35 kb`) to `61.5%` (`7.85 kb`), sustaining **`67.38%`** Sync-F1 at `8 px` (`+7.39 pp`) and **`64.42%`** Sync-F1 at `16 px` (**`+10.77 pp`** over Static Reuse `53.65%` while holding U-Miss at **`13.53%`** vs. `37.56%`).
 - **Entropy Framing ROI**: `16-ctx 2D-Arith Mask` cuts mask size by **`38.0%`** vs. `zlib` (`887.0 → 550.1 bits`), adding `+63.1` tokens (`+1.88 pp` Sync-F1, `-3.89 pp` U-Miss); `5-Tier Prefix` captures `97.9%` of adaptive Range/rANS token count (`314.8 vs. 321.7`) with zero sequential error drift under optical ISL bursts.
 
 <p align="center">
@@ -160,6 +161,7 @@ SafeSync-Mesh/
 │   ├── run_safesync_experiments.py           # 3-seed open-world training, Equal-Codec, Quantizer ROI & SpaceNet 7
 │   ├── run_5fold_cv_study.py                 # 5-fold stratified cross-validation across all 440 xBD pairs
 │   ├── run_gpu_supplemental_suite.py         # 3-seed K=128..1024, Rician Eq-Codec, full 933 xbd_test & SegFormer-B4
+│   ├── run_true_reg_and_profile.py           # 3-seed true 1024x1024 RGB shift stress, blind SpaceNet-7 & GPU profile
 │   ├── extract_extra_gpu_caches.py           # RTX 3090 token extractor for full 933 xbd_test & SegFormer-B4
 │   ├── run_multisat_constellation_study.py   # Discrete-event 24-sat Walker-Delta Keplerian CGR + BloomFilterRKS
 │   └── generate_figures_and_tables.py        # Publication figure & summary table generator

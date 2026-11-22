@@ -805,15 +805,16 @@ def plot_fig4_temporal_and_registration(res: Dict) -> None:
     axb.set_ylim(0, 84)
     axb_r.set_ylim(-0.3, 5.2)
     ratio_int = int(round(bridge["compression_ratio_vs_r33_fp16_skips"]))
-    axb.annotate(f"{b_kb[3]:.2f} KB\n({ratio_int:,}x)", xy=(3, b_rec[3]), xytext=(1.22, 51.5),
+    axb.annotate(f"{b_kb[3]:.2f} KB\n({ratio_int:,}x)", xy=(3, b_rec[3]), xytext=(1.32, 54.0),
                  arrowprops=dict(arrowstyle="->", color="#0072B2", lw=0.9, connectionstyle="arc3,rad=-0.10"),
                  fontsize=5.8, fontweight="bold", color="#0072B2",
                  bbox=dict(boxstyle="round,pad=0.15", fc="#EFF6FF", ec="#0072B2", lw=0.65))
     h_b = lb1 + lb2 + [bars_b]
     add_band_legend(fig, h_b, [x.get_label() for x in h_b], x_centers[1], ncol=2, fontsize=5.8)
 
-    # Panel (c)
+    # Panel (c): True 1024x1024 RGB pixel translations (evenly spaced categorical x for 0, 2, 4, 8, 16 px)
     sigmas = [p["registration_shift_px"] for p in reg]
+    x_c = np.arange(len(sigmas))
     adapt_f1 = [p["safesync_adaptive_sync_f1"] for p in reg]
     static_f1 = [p["static_utility_sync_f1"] for p in reg]
     adapt_rate = [p["safesync_adaptive_rate_kb"] for p in reg]
@@ -822,27 +823,46 @@ def plot_fig4_temporal_and_registration(res: Dict) -> None:
     ax2_r = ax2.twinx()
     ax2_r.spines["top"].set_visible(False)
 
-    m1 = ax2.plot(sigmas, adapt_f1, color="#0072B2", marker="o", linestyle="-", linewidth=1.40, label="SafeSync")
-    m2 = ax2.plot(sigmas, static_f1, color="#D55E00", marker="s", linestyle="--", linewidth=1.10, label="Static Reuse")
-    m3 = ax2_r.plot(sigmas, adapt_rate, color="#009E73", marker="^", linestyle="-.", linewidth=1.10, label="Rate (kb)")
+    m1 = ax2.plot(x_c, adapt_f1, color="#0072B2", marker="o", linestyle="-", linewidth=1.40, label="SafeSync")
+    m2 = ax2.plot(x_c, static_f1, color="#D55E00", marker="s", linestyle="--", linewidth=1.10, label="Static Reuse")
+    m3 = ax2_r.plot(x_c, adapt_rate, color="#009E73", marker="^", linestyle="-.", linewidth=1.10, label="Rate (kb)")
 
-    for s, r in zip(sigmas, adapt_rate):
-        if s >= 2:
-            tx, ty = (s - 1.45, r - 1.15) if s == 8 else (s - 0.85, r + 0.55)
-            ax2_r.annotate(f"{r:.1f}kb", xy=(s, r),
-                           xytext=(tx, ty),
-                           fontsize=5.9, fontweight="bold", color="#009E73",
+    for xi, (s, r) in enumerate(zip(sigmas, adapt_rate)):
+        if xi in (0, 3, 4):
+            dx, dy = (0.12, 0.55) if xi == 0 else ((-0.58, 0.72) if xi == 3 else (-0.42, 0.72))
+            ax2_r.annotate(f"{r:.1f}kb", xy=(xi, r),
+                           xytext=(xi + dx, r + dy),
+                           fontsize=5.7, fontweight="bold", color="#009E73",
                            bbox=dict(boxstyle="round,pad=0.08", fc="white", ec="none", alpha=0.85))
+    gain_max = adapt_f1[-1] - static_f1[-1]
+    ax2.annotate(
+        "",
+        xy=(x_c[-1], adapt_f1[-1] - 0.6),
+        xytext=(x_c[-1], static_f1[-1] + 0.6),
+        arrowprops=dict(arrowstyle="<->", color="#0072B2", lw=1.0),
+    )
+    ax2.text(
+        x_c[-1] - 0.14,
+        0.5 * (adapt_f1[-1] + static_f1[-1]) - 0.5,
+        f"+{gain_max:.1f} pp",
+        ha="right",
+        va="center",
+        fontsize=5.6,
+        fontweight="bold",
+        color="#0072B2",
+        bbox=dict(boxstyle="round,pad=0.12", fc="#EFF6FF", ec="#0072B2", lw=0.6),
+    )
 
-    ax2.set_xticks(sigmas)
+    ax2.set_xticks(x_c)
     ax2.set_xticklabels([f"{s}px" for s in sigmas])
-    ax2.set_xlabel("Misregistration $\\sigma_{\\mathrm{reg}}$ (Pixels)")
+    ax2.set_xlim(-0.35, len(sigmas) - 0.50)
+    ax2.set_xlabel("RGB Misregistration $\\sigma_{\\mathrm{reg}}$ (Pixels)")
     ax2.set_ylabel("Sync-F1 (%) $\\uparrow$", color="#0F172A")
     ax2_r.set_ylabel("Rate $R_t$ (kb)", color="#009E73")
-    ymin_c = min(min(static_f1), min(adapt_f1)) - 4.0
-    ymax_c = max(max(static_f1), max(adapt_f1)) + 4.0
+    ymin_c = min(min(static_f1), min(adapt_f1)) - 3.5
+    ymax_c = max(max(static_f1), max(adapt_f1)) + 4.5
     ax2.set_ylim(ymin_c, ymax_c)
-    ax2_r.set_ylim(1.0, max(9.4, max(adapt_rate) + 1.5))
+    ax2_r.set_ylim(1.0, max(10.2, max(adapt_rate) + 2.0))
     h_c = m1 + m2 + m3
     add_band_legend(fig, h_c, [x.get_label() for x in h_c], x_centers[2], ncol=2, fontsize=5.8)
 
