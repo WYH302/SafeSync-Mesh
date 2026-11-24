@@ -98,7 +98,7 @@ Simulated via 3D Keplerian Walker-Delta (`24/3/1`, `550 km`, `53°`) line-of-sig
 | Constellation Relay Protocol | Traffic / Scene (kb) ↓ | Completion (%) ↑ | Effective Sync-F1 (%) ↑ | Constellation U-Miss (%) ↓ | Mean Confirm (s) ↓ | Duplicate ISL ↓ | Confidence Inflation $\Delta q$ ↓ |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | Raw-PNG Relay (Store-Carry-Forward) | 450.00 | 2.8 ± 0.6 | 2.18 ± 0.44 | 97.17 ± 0.58 | 294.2 | 8.8% | 0.001 |
-| JPEG-90 Fragment Relay (RAPID-style) | 450.00 | 20.3 ± 1.6 | 15.56 ± 1.23 | 80.48 ± 1.54 | 252.0 | 2.9% | 0.001 |
+| JPEG-90 Fragment Relay (Prioritized) | 450.00 | 20.3 ± 1.6 | 15.56 ± 1.23 | 80.48 ± 1.54 | 252.0 | 2.9% | 0.001 |
 | STARS-style [10] (Stateless VQ ISL) | 4.67 | 63.0 ± 0.5 | 27.92 ± 0.12 | 71.09 ± 0.30 | 143.2 | 64.9% | 0.113 |
 | FMSAT-style [46] (Generative SatCom) | 4.67 | 63.0 ± 0.5 | 27.83 ± 0.10 | 71.87 ± 0.47 | 145.3 | 64.9% | 0.113 |
 | SkillComm-style [13] (Sender Stateful) | 4.69 | 46.5 ± 1.3 | 33.81 ± 0.64 | 68.39 ± 1.00 | 184.6 | 64.9% | 0.113 |
@@ -185,6 +185,32 @@ SafeSync-Mesh/
   python -m safesync.run_multisat_constellation_study
   python -m safesync.generate_figures_and_tables
   ```
+
+## Engineering Notes & Lessons Learned / 工程思考与踩坑记录
+
+A few practical observations that shaped SafeSync-Mesh during real RTX 3090 experiments:
+
+1. **Why naive skip dropping fails on SpaceNet 7 (and why bottleneck VQ + 2D refinement works)**: Transmitting 5 FP16 U-Net skip layers costs `33.02 MB` across two windows (`41×` larger than raw PNGs), yet simply dropping skip layers without adapting the ground head drops new-building emergence recall from `48.08%` to `4.62%`. Pairing `32×32` discrete VQ prototypes with a lightweight wire-only 2D depthwise-separable refinement head recovers `51.15%` new-building recall in only `1,249 bytes` (`26,440×` smaller than 5-skip FP16).
+2. **Disaster collapse vs. orthorectification shift**: When testing true `1024×1024` RGB pixel translations (`0–16 px`), a naive symmetric footprint difference `|p_loc_t - p_loc_{t-1}|` falsely triggered refreshes on clean extreme-disaster scenes where buildings collapsed into ash/mud (`p_loc_t < p_loc_{t-1}`), and overwriting the prior footprint erased collapsed targets. Switching to the disaster-invariant positive excess `d_reg+ = mean(max(0, p_loc_t - p_loc_{t-1}))` (only spatial translation moves intact roofs onto empty prior pixels) with union-envelope fusion `max(p_loc_{t-1}, p_loc_t)` recovered `+10.77 pp` Sync-F1 at `16 px` without any oracle shift knowledge.
+3. **Wire-budget ROI beats raw distortion**: Under strict `2,600`-bit frames (`325 bytes`), 2-Stage RVQ (`2×256`) lowered VQ MSE (`0.0130`) yet cost `12.97 bits/token`, starving frames to `144.3` tokens (`-6.29 pp` Sync-F1, `+19.01 pp` U-Miss). Counting every header, mask, and safety-flag bit on the wire—and replacing `zlib` with a 16-context 2D causal binary arithmetic spatial mask (`-38.0%` mask bits)—proved far more impactful than chasing lower raw MSE.
+
+> **中文笔记**：我们在实测中重点踩过三个坑：（1）多尺度 U-Net 跳跃连接直接下传高达 `33.02 MB`，但若直接砍掉跳跃连接，SpaceNet 7 新增建筑召回率会暴跌至 `4.62%`，引入纯线级 2D 深度可分离精修头后仅用 `1,249 字节` 即反超至 `51.15%`；（2）真实 `1024×1024` RGB 偏移压测中，对称建筑轮廓差会误报灾后倒塌场景，改用正向位移增量 $d_{\mathrm{reg}}^+$ 与并集包络融合后彻底杜绝误报，在 `16 px` 偏移下盲态领先静态复用 `+10.77 pp`；（3）在严格 `325 字节` 帧长下，单令牌码率偏高的 2 级 RVQ 反因令牌饥饿掉分，紧凑码本 + 16 上下文二维因果算术掩码（省 `38.0%`）才是星载低带宽场景的最高性价比解。
+
+---
+
+## Citation / 引用格式
+
+If you find this repository or our wire-protocol verifier useful in your research, please consider citing:
+
+```bibtex
+@article{wu2026safesyncmesh,
+  author  = {Wu, Yonghao},
+  title   = {SafeSync-Mesh: Epistemic State Synchronization and Provenance-Idempotent Relay for Open-World LEO Satellite Constellations},
+  journal = {Advances in Space Research (under review)},
+  year    = {2026},
+  url     = {https://github.com/WYH302/SafeSync-Mesh}
+}
+```
 
 ## License
 

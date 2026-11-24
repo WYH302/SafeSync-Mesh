@@ -1185,10 +1185,10 @@ def plot_fig7_multisat_constellation(res: Dict) -> None:
     ms_methods = [
         ("raw_png_relay", "Raw-PNG", "#7F7F7F", "v", ":"),
         ("jpeg90_fragment_relay", "JPEG-90", "#CC79A7", "D", "--"),
-        ("stateless_vq_flood", "STARS [10]", "#56B4E9", "P", ":"),
-        ("fmsat_generative_relay", "FMSAT [46]", "#8B5CF6", "X", "--"),
-        ("sender_utility_relay", "SkillComm [13]", "#E69F00", "^", "-."),
-        ("receiver_aware_no_prov", "TWIST [12]", "#D55E00", "s", "--"),
+        ("stateless_vq_flood", "STARS", "#56B4E9", "P", ":"),
+        ("fmsat_generative_relay", "FMSAT", "#8B5CF6", "X", "--"),
+        ("sender_utility_relay", "SkillComm", "#E69F00", "^", "-."),
+        ("receiver_aware_no_prov", "TWIST", "#D55E00", "s", "--"),
         ("safesync_mesh", "SafeSync-Mesh", "#0072B2", "o", "-"),
     ]
 
