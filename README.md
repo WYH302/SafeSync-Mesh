@@ -55,6 +55,7 @@ At matched application-layer budget $B_t = 2{,}600\text{ bits}$ (`2.60 kb/frame`
 
 | Method | Protocol | Wire Rate (kb) ↓ | Known-F1 (%) ↑ | All-Class Sync-F1 (%) ↑ | Unknown Miss (%) ↓ | Scene Evt Miss ↓ |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| *ChangeOS-Swin-T [41] / DamFormer [57] / MambaBDA [56] (Uncompressed Raw PNG)* | *Lit. Ceiling (4,595×)* | *11,946.0* | *85.0–87.4 (Loc)* | *76.91 / 77.02 / 81.41* | *—* | *—* |
 | *Full feature (Uncompressed VQ Ref, 3.6× rate)* | *3-Seed (Ref)* | *9.34 ± 0.00* | *75.58 ± 0.25* | *75.46 ± 0.19* | *0.00 ± 0.00* | *0.00%* |
 | Current-frame Top-$K$ | 3-Seed OW | 2.60 ± 0.00 | 43.34 ± 0.26 | 37.27 ± 0.14 | 63.51 ± 0.30 | 10.68% |
 | FMSAT-style adapted [46] | 3-Seed OW | 2.60 ± 0.00 | 50.00 ± 0.42 | 44.98 ± 0.21 | 55.35 ± 1.07 | 10.26% |
@@ -62,7 +63,9 @@ At matched application-layer budget $B_t = 2{,}600\text{ bits}$ (`2.60 kb/frame`
 | Change-Only (Innovation) | 3-Seed OW | 2.61 ± 0.00 | 67.19 ± 0.31 | 62.82 ± 0.41 | 44.38 ± 1.38 | 6.41% |
 | TWIST-inspired [12] | 3-Seed OW | 2.61 ± 0.00 | 68.64 ± 0.45 | 62.46 ± 0.46 | 37.90 ± 1.72 | 4.27% |
 | Stateful utility-only (w/o $S_{\mathrm{safe}}$) | 3-Seed OW | 2.61 ± 0.00 | 68.58 ± 0.32 | 63.15 ± 0.41 | 37.56 ± 0.90 | 2.56% |
-| **SafeSync-Mesh (Ours)** | **3-Seed OW** | **2.60 ± 0.00** | **72.32 ± 0.24** | **70.36 ± 0.78** | **13.95 ± 4.88** | **0.00%** |
+| **SafeSync-Mesh (Cell `ver=1`, `K=512`)** | **3-Seed OW** | **2.60 ± 0.00** | **72.32 ± 0.24** | **70.36 ± 0.78** | **13.95 ± 4.88** | **0.00%** |
+| **SafeSync-Mesh (`4×4` SB `ver=2`, `K=512`)** | **3-Seed OW** | **2.60 ± 0.00** | **73.48 ± 0.27** | **71.93 ± 0.88** | **9.49 ± 4.58** | **0.00%** |
+| **SafeSync-Mesh (`4×4` SB `ver=2`, `K=128`, `64 KB`)** | **3-Seed OW** | **2.59 ± 0.00** | **74.10 ± 0.07** | **73.68 ± 0.22** | **1.68 ± 0.27** | **0.00%** |
 | FMSAT-style adapted [46] | 5-Fold CV | 2.60 | 51.36 ± 2.69 | 46.46 ± 3.02 | 52.84 ± 13.95 | 9.45% |
 | STARS-style adapted [10] | 5-Fold CV | 2.59 | 51.66 ± 2.73 | 46.65 ± 3.06 | 51.59 ± 14.07 | 7.53% |
 | Stateful utility-only (w/o $S_{\mathrm{safe}}$) | 5-Fold CV | 2.61 | 69.44 ± 2.87 | 63.39 ± 1.80 | 35.67 ± 10.68 | 3.06% |
@@ -80,6 +83,8 @@ At matched application-layer budget $B_t = 2{,}600\text{ bits}$ (`2.60 kb/frame`
 - **Wire Protocol `ver=2` (`4×4` Super-Block $S_{\mathrm{safe}}$) & Budget-Adaptive `K=128/512` (3 Seeds, Bit-Exact CRC32)**: Encoding $S_{\mathrm{safe}}$ at `4×4` super-block granularity slashes safety metadata by **`65.0%` (`102.4 → 35.8 b`)**, lifting clean `K=512` performance to **`71.93%` Sync-F1 / `9.49%` U-Miss** (beating Equal-Codec `Util-EqCodec` `12.15%` even on clean links!) and `4 dB` Rician fading to **`66.49%` / `30.89%`** (`+12.36 pp` / `-40.88 pp` over `Util-EqCodec`). In compact `K=128` (`64 KB` SRAM) tight-link mode, `ver=2` reaches **`73.68%` Sync-F1 / `1.68%` U-Miss** clean (`3.7×` lower than `Util-EqCodec` `6.26%`) and **`68.49%` / `24.13%`** under `4 dB` Rician fading.
 - **24-to-240-Satellite Starlink Shell-1 Scaling & Proposition 3 Verification (3 Seeds)**: Scaling the 3D Walker-Delta shell tenfold to `240` relays (`N_task = 2,000`, mean `7.18` ISL hops) empirically validates Proposition 3 (`p_fp <= (1 - exp(-k n_w / m))^k` and `N_max <= floor(C_ISL / (r_eff * eta_dup(H)))`): non-provenance TWIST collapses to `23.67%` completion (`N_max = 477 => 23.85%`) and `15.30%` Sync-F1 under `77.56%` echo storms, while SafeSync-Mesh with linearly scaled `256-bit` RKS Bloom width holds **`96.80%` completion**, **`66.96%` Sync-F1 (`4.38×` over TWIST)**, and **`2.75%` duplicates**.
 - **Optical Cloud-Occlusion Stress (`0%–40%` Real Swin-T Fractal Clouds, 3 Seeds)**: Lightweight onboard RGB whiteness–saturation cloud gating (`95.5%–99.4%` precision, zero ground-truth peeking) cuts wasted cloud-token bandwidth at `40%` cloud cover from **`62.2% → 17.3%` (`-44.9 pp`)**, slashes cloud-free disaster U-Miss by **`66%` (`15.42% → 5.24%`**, vs. `49.66%` Stateful Utility-Only and `28.28%` TWIST), and lifts visible Sync-F1 to **`72.82%`**.
+- **Live NORAD/CelesTrak 240-Satellite SpaceX Starlink WGS-84 SGP4 Ephemeris Study (3 Seeds)**: Validated on `240` operational SpaceX Starlink satellites filtered from the live `10,592`-satellite NORAD/CelesTrak GP catalog (`470.6 ± 6.6 km`, `53.16°`, `e = 0.000142`, `5.82%/15 s` ISL topology churn, `455.3 kHz` peak Ka-band `20 GHz` downlink Doppler / `5,644.1 Hz/s` rate, `6.80 GHz` `1550 nm` optical ISL Doppler): SafeSync-Mesh (`m = 256 b`) achieves **`97.27%` completion**, **`67.55%` Sync-F1**, **`2.52%` duplicates**, and **`0.000` inflation** (`N_task = 2,000`), matching idealized Walker-Delta within `0.5 pp` while `TWIST` collapses to `22.93%` (`14.85%` Sync-F1).
+- **True Bit-Level Girth-6 QC-LDPC Soft Min-Sum BP + SGP4 LEO Doppler (`3,584` Matched Coded Air Bits, 3 Seeds × `8×` CRN)**: Explicitly deducting Rate-1/2 UEP parity from the exact same `7 × 512 = 3,584` coded channel bits (`3×(512,256) + 4×(512,384)` vs. `7×(512,384)` uniform Rate-3/4, `25`-iter GPU Normalized Min-Sum BP, Rician `K = 6 dB`, Doppler $\sigma_\phi = 10^\circ$), SafeSync-Mesh UEP beats matched `Util-EqCodec` at `4 dB` $E_s/N_0$ by **`+4.02 pp` Sync-F1 / `-18.74 pp` U-Miss (`K=512`)** and **`+5.79 pp` / `-24.13 pp` (`K=128`, `63.00% / 39.98%` vs. `57.21% / 64.11%`)**, while switching cleanly to uniform `R=3/4` at `8–12 dB` (`71.21% / 12.27%`).
 - **Entropy Framing ROI**: `16-ctx 2D-Arith Mask` cuts mask size by **`38.0%`** vs. `zlib` (`887.0 → 550.1 bits`), adding `+63.1` tokens (`+1.88 pp` Sync-F1, `-3.89 pp` U-Miss); `5-Tier Prefix` captures `97.9%` of adaptive Range/rANS token count (`314.8 vs. 321.7`) with zero sequential error drift under optical ISL bursts.
 
 <p align="center">
@@ -135,7 +140,7 @@ Clone the repository and run both the standalone quickstart verifier and pytest 
 ```bash
 git clone https://github.com/WYH302/SafeSync-Mesh.git
 cd SafeSync-Mesh
-pip install -r requirements.txt
+pip install -e ".[dev]"
 python verify_quickstart.py
 pytest -q
 ```
@@ -163,8 +168,10 @@ SafeSync-Mesh/
 │   ├── gpu_supplemental_r36.json             # Real 3-seed K sweep, Rician Eq-Codec, 933 xbd_test & SegFormer-B4
 │   ├── scheme1_constellation_scale240.json   # 24->240-sat Starlink Shell-1 scaling & Proposition 3 Bloom verification
 │   ├── scheme1_gpu_upgrades_r36.json         # 4x4 Super-Block ver=2, K=128/512, 2-B FFT pre-align & 0-40% cloud stress
+│   ├── upgrade_sgp4_starlink_tle_240.json    # Live NORAD/CelesTrak 240-sat SpaceX Starlink WGS-84 SGP4 ephemeris study
+│   ├── upgrade_phy_ldpc_doppler_r36.json     # Equal-air-bit (3,584-b) Girth-6 QC-LDPC Min-Sum BP + SGP4 LEO Doppler PHY
 │   └── tables_r36_summary.md
-├── safesync/                                 # Core codec, training, CV, supplemental & constellation scripts
+├── safesync/                                 # Core codec, training, CV, PHY, SGP4 & constellation scripts
 │   ├── __init__.py
 │   ├── safesync_wire.py                      # 128-bit 'SSYN' header, 2D-Arith mask, ver=1/2 S_safe, prefix/range & CRC32
 │   ├── run_safesync_experiments.py           # 3-seed open-world training, Equal-Codec, Quantizer ROI & SpaceNet 7
@@ -173,9 +180,12 @@ SafeSync-Mesh/
 │   ├── run_true_reg_and_profile.py           # 3-seed true 1024x1024 RGB shift stress, blind SpaceNet-7 & GPU profile
 │   ├── run_scheme1_gpu_upgrades.py           # 3-seed 4x4 Super-Block ver=2, 2-B FFT pre-align & 0-40% optical cloud stress
 │   ├── run_constellation_scale_240.py        # 24->60->120->240-sat Walker-Delta scaling & Proposition 3 verification
+│   ├── run_sgp4_starlink_tle_240.py          # Live NORAD/CelesTrak 240-sat SpaceX Starlink WGS-84 SGP4 propagator
+│   ├── run_phy_ldpc_doppler_study.py         # Bit-level Girth-6 QC-LDPC GPU Min-Sum BP + LEO Doppler PHY benchmark
 │   ├── extract_extra_gpu_caches.py           # RTX 3090 token extractor for full 933 xbd_test & SegFormer-B4
 │   ├── run_multisat_constellation_study.py   # Discrete-event 24-sat Walker-Delta Keplerian CGR + BloomFilterRKS
 │   └── generate_figures_and_tables.py        # Publication figure & summary table generator
+├── pyproject.toml                            # Standard editable pip package metadata (safesync-mesh)
 ├── tests/
 │   └── test_safesync_wire.py                 # Unit tests for ver=1/2 wire modes, K=128..1024, 2D-Arith, RKS & tables
 ├── verify_quickstart.py                      # Out-of-the-box binary wire & result verification suite
