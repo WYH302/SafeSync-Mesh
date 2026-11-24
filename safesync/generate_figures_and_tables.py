@@ -26,8 +26,8 @@ from PIL import Image
 import pyarrow.parquet as pq
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PUB_ROOT = PROJECT_ROOT
-R36_ROOT = PROJECT_ROOT
+PUB_ROOT = PROJECT_ROOT / "experiments"
+R36_ROOT = PUB_ROOT / "round36"
 RESULTS_JSON = R36_ROOT / "results" / "safesync_r36_complete_results.json"
 CACHE_DIR = R36_ROOT / "data_cache"
 FIG_DIR = R36_ROOT / "figures"
@@ -1369,6 +1369,145 @@ def write_latex_tables(res: Dict) -> None:
     print(f"[Saved Markdown Tables] {out_path}")
 
 
+# ==============================================================================
+# Figure 8: Mega-Constellation Scaling (24->240), 2-B FFT Pre-Align & Cloud Gate
+#           (Locked 7.16 x 2.40 in 1x3 Grid)
+# ==============================================================================
+def plot_fig8_scheme1_scalability_and_cloud(res: Dict) -> None:
+    s1 = res["scheme1_upgrades"]
+    tiers = s1["constellation_scale_240"]["constellation_tiers"]
+    reg_no_fft = res["aggregated_3seed"]["registration_stress"]
+    s8a = s1["s8a_fft_subcell_prealignment"]["shifts"]
+    s8b = s1["s8b_optical_cloud_stress"]["cloud_sweep"]
+
+    fig, axes, x_centers = make_locked_1x3_figure((
+        "(a) 24-to-240-Sat Shell-1 Scaling",
+        "(b) 2-B FFT Pre-Align vs. Refresh",
+        "(c) Optical Cloud Occlusion Stress",
+    ))
+
+    # --- Panel (a): 24 -> 60 -> 120 -> 240 Satellite Constellation Scaling ---
+    ax0 = axes[0]
+    sat_labels = [f"{t['topology']['n_relays']}\n({t['n_tasks']})" for t in tiers]
+    x0 = np.arange(len(tiers))
+    ss_f1 = [t["protocols"]["safesync_mesh_scaled_rks"]["effective_sync_f1"] for t in tiers]
+    su_f1 = [t["protocols"]["sender_utility_relay"]["effective_sync_f1"] for t in tiers]
+    st_f1 = [t["protocols"]["stateless_vq_flood"]["effective_sync_f1"] for t in tiers]
+    tw_f1 = [t["protocols"]["receiver_aware_no_prov"]["effective_sync_f1"] for t in tiers]
+
+    ax0.plot(x0, ss_f1, color="#0072B2", marker="o", linestyle="-", linewidth=1.45, label="SafeSync-Mesh")
+    ax0.plot(x0, su_f1, color="#009E73", marker="s", linestyle="--", linewidth=1.10, label="SkillComm")
+    ax0.plot(x0, st_f1, color="#CC79A7", marker="^", linestyle=":", linewidth=1.10, label="STARS")
+    ax0.plot(x0, tw_f1, color="#D55E00", marker="D", linestyle="-.", linewidth=1.10, label="TWIST (No-Prov)")
+
+    ax0.annotate(
+        "",
+        xy=(x0[-1], ss_f1[-1] - 1.2),
+        xytext=(x0[-1], su_f1[-1] + 1.2),
+        arrowprops=dict(arrowstyle="<->", color="#0072B2", lw=0.95),
+    )
+    ax0.text(
+        x0[-1] - 0.14,
+        0.5 * (ss_f1[-1] + su_f1[-1]) + 2.0,
+        f"+{ss_f1[-1] - su_f1[-1]:.1f} pp\nDup: 2.8% vs 77.5%",
+        ha="right", va="center", fontsize=5.2, fontweight="bold", color="#0072B2",
+        bbox=dict(boxstyle="round,pad=0.14", fc="#EFF6FF", ec="#0072B2", lw=0.6),
+    )
+
+    ax0.set_xticks(x0)
+    ax0.set_xticklabels(sat_labels, fontsize=6.1)
+    ax0.set_xlim(-0.30, len(tiers) - 0.55)
+    ax0.set_ylim(10, 78)
+    ax0.set_xlabel("Relays $N_{\\mathrm{sat}}$ ($N_{\\mathrm{task}}$ Scenes)")
+    ax0.set_ylabel("Const. Sync-F1 (%) $\\uparrow$")
+    h0, l0 = ax0.get_legend_handles_labels()
+    add_band_legend(fig, h0, l0, x_centers[0], ncol=2, fontsize=5.6, colspacing=0.45)
+
+    # --- Panel (b): 2-Byte Onboard 2D FFT Sub-Cell Pre-Alignment vs Blind Refresh ---
+    ax1 = axes[1]
+    ax1_r = ax1.twinx()
+    ax1_r.spines["top"].set_visible(False)
+
+    sigmas = [p["registration_shift_px"] for p in reg_no_fft]
+    x1 = np.arange(len(sigmas))
+    fft_f1 = [p["fft_sync_f1"] for p in s8a]
+    ref_f1 = [p["safesync_adaptive_sync_f1"] for p in reg_no_fft]
+    sta_f1 = [p["static_utility_sync_f1"] for p in reg_no_fft]
+    fft_rt = [p["fft_rate_kb"] for p in s8a]
+    ref_rt = [p["safesync_adaptive_rate_kb"] for p in reg_no_fft]
+
+    m1 = ax1.plot(x1, fft_f1, color="#0072B2", marker="o", linestyle="-", linewidth=1.45, label="SafeSync+FFT")
+    m2 = ax1.plot(x1, ref_f1, color="#009E73", marker="^", linestyle="--", linewidth=1.10, label="Blind Refresh")
+    m3 = ax1.plot(x1, sta_f1, color="#D55E00", marker="s", linestyle=":", linewidth=1.10, label="Static Reuse")
+    r1 = ax1_r.plot(x1, fft_rt, color="#1D4ED8", marker="o", linestyle="-.", linewidth=0.95, markersize=3.0, alpha=0.80, label="FFT Rate")
+    r2 = ax1_r.plot(x1, ref_rt, color="#64748B", marker="^", linestyle="-.", linewidth=0.90, markersize=3.0, alpha=0.75, label="Ref. Rate")
+
+    ax1_r.annotate(
+        f"4.7 vs 7.9 kb\n(-40.5% Rate)",
+        xy=(x1[-1], fft_rt[-1] - 0.15),
+        xytext=(0.55, 2.05),
+        arrowprops=dict(arrowstyle="->", color="#1D4ED8", lw=0.85, connectionstyle="arc3,rad=0.14"),
+        fontsize=5.2, fontweight="bold", color="#1D4ED8",
+        bbox=dict(boxstyle="round,pad=0.12", fc="#EFF6FF", ec="#1D4ED8", lw=0.55),
+    )
+
+    ax1.set_xticks(x1)
+    ax1.set_xticklabels([f"{s}px" for s in sigmas], fontsize=6.3)
+    ax1.set_xlim(-0.30, len(sigmas) - 0.55)
+    ax1.set_ylim(50, 76)
+    ax1_r.set_ylim(1.5, 9.6)
+    ax1.set_xlabel("RGB Shift $\\sigma_{\\mathrm{reg}}$ (Pixels)")
+    ax1.set_ylabel("Sync-F1 (%) $\\uparrow$", color="#0F172A")
+    ax1_r.set_ylabel("Wire Rate (kb) $\\downarrow$", color="#475569")
+    h1 = m1 + m2 + m3 + r1 + r2
+    add_band_legend(fig, h1, [x.get_label() for x in h1], x_centers[1], ncol=3, fontsize=5.1, colspacing=0.35, handlelength=1.05)
+
+    # --- Panel (c): Optical Cloud Occlusion Stress (0% to 40% Cloud Cover) ---
+    ax2 = axes[2]
+    ax2_r = ax2.twinx()
+    ax2_r.spines["top"].set_visible(False)
+
+    clouds = [0, 10, 20, 30, 40]
+    x2 = np.arange(len(clouds))
+    um_gate = [s8b[str(c)]["safesync_cloud_gated"]["visible_u_miss"] for c in clouds]
+    um_naiv = [s8b[str(c)]["safesync_naive"]["visible_u_miss"] for c in clouds]
+    um_tw = [s8b[str(c)]["twist_inspired"]["visible_u_miss"] for c in clouds]
+    um_util = [s8b[str(c)]["stateful_utility_only"]["visible_u_miss"] for c in clouds]
+    w_naiv = [s8b[str(c)]["safesync_naive"]["wasted_cloud_token_pct"] for c in clouds]
+    w_gate = [s8b[str(c)]["safesync_cloud_gated"]["wasted_cloud_token_pct"] for c in clouds]
+
+    bw = 0.28
+    b_n = ax2_r.bar(x2 - bw / 2, w_naiv, width=bw, color="#FCA5A5", alpha=0.45, edgecolor="#B91C1C", linewidth=0.45, label="Naive Waste")
+    b_g = ax2_r.bar(x2 + bw / 2, w_gate, width=bw, color="#93C5FD", alpha=0.50, edgecolor="#1D4ED8", linewidth=0.45, label="Gated Waste")
+
+    c1 = ax2.plot(x2, um_gate, color="#0072B2", marker="o", linestyle="-", linewidth=1.45, label="Cloud-Gated")
+    c2 = ax2.plot(x2, um_naiv, color="#009E73", marker="^", linestyle="--", linewidth=1.10, label="Naive SS")
+    c3 = ax2.plot(x2, um_tw, color="#CC79A7", marker="D", linestyle="-.", linewidth=1.00, label="TWIST")
+    c4 = ax2.plot(x2, um_util, color="#D55E00", marker="s", linestyle=":", linewidth=1.05, label="Util-Only")
+
+    ax2.annotate(
+        f"5.2% vs 15.4%\n(-66% U-Miss)",
+        xy=(x2[-1] - 0.05, um_gate[-1] + 0.9),
+        xytext=(0.05, 25.0),
+        arrowprops=dict(arrowstyle="->", color="#0072B2", lw=0.85, connectionstyle="arc3,rad=-0.12"),
+        fontsize=5.2, fontweight="bold", color="#0072B2",
+        bbox=dict(boxstyle="round,pad=0.12", fc="#EFF6FF", ec="#0072B2", lw=0.55),
+    )
+
+    ax2.set_xticks(x2)
+    ax2.set_xticklabels([f"{c}%" for c in clouds], fontsize=6.3)
+    ax2.set_xlim(-0.45, len(clouds) - 0.45)
+    ax2.set_ylim(0, 56)
+    ax2_r.set_ylim(0, 82)
+    ax2.set_xlabel("Optical Cloud Cover (%)")
+    ax2.set_ylabel("Visible U-Miss (%) $\\downarrow$", color="#0F172A")
+    ax2_r.set_ylabel("Cloud Waste (%) $\\downarrow$", color="#475569")
+    h2 = c1 + c2 + c3 + c4 + [b_n, b_g]
+    add_band_legend(fig, h2, [x.get_label() for x in h2], x_centers[2], ncol=3, fontsize=5.0, colspacing=0.30, handlelength=1.0)
+
+    save_pub_fig(fig, "fig8_scheme1_scalability_and_cloud")
+
+
 def main() -> None:
     import sys
     sys.stdout.reconfigure(encoding="utf-8")
@@ -1382,8 +1521,10 @@ def main() -> None:
     plot_fig6_qualitative()
     if "multisat_constellation_study" in res:
         plot_fig7_multisat_constellation(res)
+    if "scheme1_upgrades" in res:
+        plot_fig8_scheme1_scalability_and_cloud(res)
     write_latex_tables(res)
-    print("[Done] All 7 native 7.16-in figures and Markdown tables generated successfully.")
+    print("[Done] All 8 native 7.16-in figures and Markdown tables generated successfully.")
 
 
 if __name__ == "__main__":

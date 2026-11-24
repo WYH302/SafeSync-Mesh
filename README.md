@@ -76,7 +76,10 @@ At matched application-layer budget $B_t = 2{,}600\text{ bits}$ (`2.60 kb/frame`
 - **Physical DVB-S2X Rician Fading (`4 dB SNR`, `K=6 dB`)**: SafeSync-Mesh (`64.90%` Sync-F1, `35.83%` U-Miss) beats even Equal-Codec `Util-EqCodec` (`54.13% / 71.77%`) by **`+10.77 pp` Sync-F1 and `-35.94 pp` U-Miss** via rate-1/2 UEP on $S_{\mathrm{safe}}$.
 - **Full-Scale Official `xbd_test` (`933` Scenes / `955,392` Tokens, Zero Subsampling)**: SafeSync-Mesh achieves **`71.71%` Sync-F1**, **`9.31%` U-Miss**, and the strictly lowest **`0.50%` scene event miss** across all 9 methods (`+6.90 pp` Sync / `-23.65 pp` U-Miss over TWIST; strictly lowest U-Miss on `palu-tsunami`, `mexico-earthquake`, `socal-fire`, and `guatemala-volcano`).
 - **Cross-Backbone Generalization (`SegFormer-B4` / MiT-B4, 3 Seeds)**: SafeSync-Mesh achieves **`54.71%` Sync-F1** (`+5.92 pp` over TWIST) and the strictly lowest **`23.77%` U-Miss** across every baseline—beating even `Util-EqCodec` (`28.49%`, `-4.72 pp`) and `TWIST-EqCodec` (`36.65%`, `-12.88 pp`).
-- **True `1024×1024` RGB Misregistration Stress (`{0, 2, 4, 8, 16}` px, 3 Seeds, 100% Blind Gate)**: Disaster-invariant positive footprint excess gate ($d_{\mathrm{reg}}^+ > \tau_{\mathrm{reg}} = 0.1065$, calibrated strictly on clean `Val-Proxy`, zero knowledge of shift magnitude) scales refresh frequency blindly from `9.0%` (`3.35 kb`) to `61.5%` (`7.85 kb`), sustaining **`67.38%`** Sync-F1 at `8 px` (`+7.39 pp`) and **`64.42%`** Sync-F1 at `16 px` (**`+10.77 pp`** over Static Reuse `53.65%` while holding U-Miss at **`13.53%`** vs. `37.56%`).
+- **True `1024×1024` RGB Misregistration Stress + 2-Byte Onboard 2D FFT Pre-Alignment (`{0, 2, 4, 8, 16}` px, 3 Seeds, 100% Blind Gate)**: Disaster-invariant positive footprint excess gate ($d_{\mathrm{reg}}^+ > \tau_{\mathrm{reg}} = 0.1065$, calibrated strictly on clean `Val-Proxy`, zero knowledge of shift magnitude) sustains `64.42%` Sync-F1 at `16 px` (`7.85 kb`). Preceding the blind gate with a 2-byte (`16-bit`) signed onboard 2D FFT sub-cell pre-alignment header on `32×32` localization maps (`25.7 ms` median) cuts residual full-VQ refreshes from `61.5% → 24.5%`, saves **`40.5%` wire rate (`7.85 → 4.67 kb`)**, raises Sync-F1 to **`67.39%` (`+13.74 pp` above Static Reuse `53.65%`)**, and reduces U-Miss to **`10.14%`** (vs. `37.56%`).
+- **Wire Protocol `ver=2` (`4×4` Super-Block $S_{\mathrm{safe}}$) & Budget-Adaptive `K=128/512` (3 Seeds, Bit-Exact CRC32)**: Encoding $S_{\mathrm{safe}}$ at `4×4` super-block granularity slashes safety metadata by **`65.0%` (`102.4 → 35.8 b`)**, lifting clean `K=512` performance to **`71.93%` Sync-F1 / `9.49%` U-Miss** (beating Equal-Codec `Util-EqCodec` `12.15%` even on clean links!) and `4 dB` Rician fading to **`66.49%` / `30.89%`** (`+12.36 pp` / `-40.88 pp` over `Util-EqCodec`). In compact `K=128` (`64 KB` SRAM) tight-link mode, `ver=2` reaches **`73.68%` Sync-F1 / `1.68%` U-Miss** clean (`3.7×` lower than `Util-EqCodec` `6.26%`) and **`68.49%` / `24.13%`** under `4 dB` Rician fading.
+- **24-to-240-Satellite Starlink Shell-1 Scaling & Proposition 3 Verification (3 Seeds)**: Scaling the 3D Walker-Delta shell tenfold to `240` relays (`N_task = 2,000`, mean `7.18` ISL hops) empirically validates Proposition 3 (`p_fp <= (1 - exp(-k n_w / m))^k` and `N_max <= floor(C_ISL / (r_eff * eta_dup(H)))`): non-provenance TWIST collapses to `23.67%` completion (`N_max = 477 => 23.85%`) and `15.30%` Sync-F1 under `77.56%` echo storms, while SafeSync-Mesh with linearly scaled `256-bit` RKS Bloom width holds **`96.80%` completion**, **`66.96%` Sync-F1 (`4.38×` over TWIST)**, and **`2.75%` duplicates**.
+- **Optical Cloud-Occlusion Stress (`0%–40%` Real Swin-T Fractal Clouds, 3 Seeds)**: Lightweight onboard RGB whiteness–saturation cloud gating (`95.5%–99.4%` precision, zero ground-truth peeking) cuts wasted cloud-token bandwidth at `40%` cloud cover from **`62.2% → 17.3%` (`-44.9 pp`)**, slashes cloud-free disaster U-Miss by **`66%` (`15.42% → 5.24%`**, vs. `49.66%` Stateful Utility-Only and `28.28%` TWIST), and lifts visible Sync-F1 to **`72.82%`**.
 - **Entropy Framing ROI**: `16-ctx 2D-Arith Mask` cuts mask size by **`38.0%`** vs. `zlib` (`887.0 → 550.1 bits`), adding `+63.1` tokens (`+1.88 pp` Sync-F1, `-3.89 pp` U-Miss); `5-Tier Prefix` captures `97.9%` of adaptive Range/rANS token count (`314.8 vs. 321.7`) with zero sequential error drift under optical ISL bursts.
 
 <p align="center">
@@ -107,6 +110,10 @@ Simulated via 3D Keplerian Walker-Delta (`24/3/1`, `550 km`, `53°`) line-of-sig
 
 <p align="center">
   <img src="assets/fig7_multisat_starlink_constellation.png" width="96%" alt="24-Satellite Walker-Delta LEO ISL Constellation Results"/>
+</p>
+
+<p align="center">
+  <img src="assets/fig8_scheme1_scalability_and_cloud.png" width="96%" alt="240-Satellite Scaling, 2-Byte FFT Pre-Alignment, and Optical Cloud Stress"/>
 </p>
 
 ### 3. Wire-Level Bit Accounting, Channel Resilience & Qualitative Overlays
@@ -140,7 +147,7 @@ Expected output:
 [PASS] 3-Seed Open-World (2.60 kb/frame): Known-F1=72.32%, Sync-F1=70.36%, U-Miss=13.95%
 [PASS] 5-Fold Cross-Validation (440 xBD pairs): Known-F1=72.79%±1.54%, Sync-F1=70.49%±1.13%, U-Miss=5.99%±4.31%
 [PASS] 24-Sat Walker-Delta ISL Surge (N=200): Completion=99.2%, Constellation Sync-F1=70.42%, Confirm=23.6s
-5 passed
+6 passed
 ```
 
 ---
@@ -149,24 +156,28 @@ Expected output:
 
 ```text
 SafeSync-Mesh/
-├── assets/                                   # Publication-ready evaluation figures (PNG)
-├── results/                                  # Verified 3-seed, 5-fold CV, ROI, S1-S5 & 24-sat JSON/MD summaries
+├── assets/                                   # Publication-ready evaluation figures (Fig. 1 - Fig. 8 PNG)
+├── results/                                  # Verified 3-seed, 5-fold CV, ROI, S1-S8 & 24-to-240-sat JSON/MD summaries
 │   ├── safesync_r36_complete_results.json
 │   ├── five_fold_cv_r36.json
 │   ├── gpu_supplemental_r36.json             # Real 3-seed K sweep, Rician Eq-Codec, 933 xbd_test & SegFormer-B4
+│   ├── scheme1_constellation_scale240.json   # 24->240-sat Starlink Shell-1 scaling & Proposition 3 Bloom verification
+│   ├── scheme1_gpu_upgrades_r36.json         # 4x4 Super-Block ver=2, K=128/512, 2-B FFT pre-align & 0-40% cloud stress
 │   └── tables_r36_summary.md
 ├── safesync/                                 # Core codec, training, CV, supplemental & constellation scripts
 │   ├── __init__.py
-│   ├── safesync_wire.py                      # 128-bit 'SSYN' header, 2D-Arith mask, 2D prefix/range VQ codec & CRC32
+│   ├── safesync_wire.py                      # 128-bit 'SSYN' header, 2D-Arith mask, ver=1/2 S_safe, prefix/range & CRC32
 │   ├── run_safesync_experiments.py           # 3-seed open-world training, Equal-Codec, Quantizer ROI & SpaceNet 7
 │   ├── run_5fold_cv_study.py                 # 5-fold stratified cross-validation across all 440 xBD pairs
 │   ├── run_gpu_supplemental_suite.py         # 3-seed K=128..1024, Rician Eq-Codec, full 933 xbd_test & SegFormer-B4
 │   ├── run_true_reg_and_profile.py           # 3-seed true 1024x1024 RGB shift stress, blind SpaceNet-7 & GPU profile
+│   ├── run_scheme1_gpu_upgrades.py           # 3-seed 4x4 Super-Block ver=2, 2-B FFT pre-align & 0-40% optical cloud stress
+│   ├── run_constellation_scale_240.py        # 24->60->120->240-sat Walker-Delta scaling & Proposition 3 verification
 │   ├── extract_extra_gpu_caches.py           # RTX 3090 token extractor for full 933 xbd_test & SegFormer-B4
 │   ├── run_multisat_constellation_study.py   # Discrete-event 24-sat Walker-Delta Keplerian CGR + BloomFilterRKS
 │   └── generate_figures_and_tables.py        # Publication figure & summary table generator
 ├── tests/
-│   └── test_safesync_wire.py                 # Unit tests for K=128..1024 wire modes, 2D-Arith, range, RKS & tables
+│   └── test_safesync_wire.py                 # Unit tests for ver=1/2 wire modes, K=128..1024, 2D-Arith, RKS & tables
 ├── verify_quickstart.py                      # Out-of-the-box binary wire & result verification suite
 ├── requirements.txt
 └── LICENSE
@@ -177,7 +188,7 @@ SafeSync-Mesh/
 ## Reproducibility / 复现说明
 
 - **Datasets**: Publicly available [xBD](https://xview2.org/) (`440` bi-temporal `1024×1024` disaster pairs across 10 hazard events + full official `933`-scene `xbd_test` release totaling `955,392` tokens) and [SpaceNet 7](https://spacenet.ai/sn7-challenge/) (`24` multi-month `512×512` urban tracking windows).
-- **Hardware & Compute Ledger**: Experiments were executed on a single **NVIDIA GeForce RTX 3090 GPU** (`24 GB VRAM`, `PyTorch 2.8.0+cu128`, `CUDA 12.8`), with orbital edge profiling on a `15 W` **NVIDIA Jetson Orin NX** (`16 GB`). Total cumulative compute across the full study is **8.83 GPU-hours** (`2.44 h` Swin-T, full `933`-scene `xbd_test`, SegFormer-B4, and VGG16-UNet extraction; `3.48 h` 3-seed multi-method training; `0.04 h` / `157.3 s` 5-fold stratified cross-validation; and `2.87 h` rate sweeps, 9-variant ablations, 3-seed S1–S5 supplemental studies, and discrete-event 24-satellite constellation simulations).
+- **Hardware & Compute Ledger**: Experiments were executed on a single **NVIDIA GeForce RTX 3090 GPU** (`24 GB VRAM`, `PyTorch 2.8.0+cu128`, `CUDA 12.8`), with orbital edge profiling on a `15 W` **NVIDIA Jetson Orin NX** (`16 GB`). Total cumulative compute across the full study is **9.21 GPU-hours** (`2.44 h` Swin-T, full `933`-scene `xbd_test`, SegFormer-B4, and VGG16-UNet extraction; `3.48 h` 3-seed multi-method training; `0.04 h` / `157.3 s` 5-fold stratified cross-validation; and `3.25 h` rate sweeps, 9-variant ablations, 3-seed S1–S8 supplemental/stress studies, and discrete-event `24`-to-`240`-satellite constellation simulations).
 - **Full Re-run**: Once cached token tensors (`xbd_openworld_features_440.npz` and `sn7_bottleneck_tokens.npz`) are placed under `data_cache/`, run:
   ```bash
   python -m safesync.run_safesync_experiments

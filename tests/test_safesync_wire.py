@@ -87,5 +87,28 @@ def test_arbitrary_codebook_sizes_bit_exact() -> None:
             assert np.array_equal(dec["reconstructed_indices"][sel], cur[sel])
 
 
+def test_superblock_4x4_ver2_bit_exact_and_compact() -> None:
+    rng = np.random.default_rng(777)
+    cb = rng.standard_normal((512, 64), dtype=np.float32)
+    codec = ConditionalTokenEntropyCodec(cb)
+    pri = rng.integers(0, 512, size=1024, dtype=np.int32)
+    cur = rng.integers(0, 512, size=1024, dtype=np.int32)
+    mask2d = np.zeros((32, 32), dtype=bool)
+    mask2d[4:20, 6:22] = True
+    sel = mask2d.reshape(1024)
+    safe2d = np.zeros((32, 32), dtype=bool)
+    safe2d[8:12, 8:16] = True
+    safe = safe2d.reshape(1024)
+    risk = rng.random(1024).astype(np.float32)
+
+    enc_v1 = encode_safesync_packet("sb_scene", pri, cur, sel, safe, risk, codec, superblock_safe=False)
+    enc_v2 = encode_safesync_packet("sb_scene", pri, cur, sel, safe, risk, codec, superblock_safe=True)
+    assert enc_v2["safety_meta_bits"] < enc_v1["safety_meta_bits"], "ver=2 4x4 super-block must save safety metadata bits"
+    dec_v2 = decode_safesync_packet(enc_v2["packet"], "sb_scene", pri, codec)
+    assert np.array_equal(dec_v2["selected_mask"], sel)
+    assert np.all(dec_v2["safety_mask"][safe]), "Decoded super-block mask must cover all safety cells"
+    assert np.array_equal(dec_v2["reconstructed_indices"][sel], cur[sel])
+
+
 def test_published_result_tables() -> None:
     verify_published_tables()

@@ -29,7 +29,7 @@ import torch.nn.functional as F
 HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE / "scripts"))
 
-from safesync.safesync_wire import (  # noqa: E402
+from safesync_wire import (  # noqa: E402
     ConditionalTokenEntropyCodec,
     decode_safesync_packet,
     encode_safesync_packet,
@@ -462,6 +462,7 @@ def evaluate_policy_on_scenes(
     alpha_weight: float = 0.72,
     preencoded_cache: dict | None = None,
     return_encoded_cache: bool = False,
+    superblock_safe: bool = False,
 ) -> dict:
     """Strictly fair, zero-hack wire packet encoding, independent CRC32 decoding, and neural T_psi inference."""
     n_scenes = test_f_curr.shape[0]
@@ -611,7 +612,7 @@ def evaluate_policy_on_scenes(
                         p_safe_only = encode_safesync_packet(
                             f"scene_{s_i}", pri_idx, eff_curr_idx, sel_mask, safe_mask,
                             test_cal_upper[s_i], codec, uses_safesync_codec, is_stateless,
-                            force_sparse, eff_2d_arith, eff_range,
+                            force_sparse, eff_2d_arith, eff_range, False, superblock_safe,
                         )
                         if p_safe_only["total_bits"] > budget_bits:
                             safe_pos = np.flatnonzero(safe_mask)
@@ -624,7 +625,7 @@ def evaluate_policy_on_scenes(
                                 p_try = encode_safesync_packet(
                                     f"scene_{s_i}", pri_idx, eff_curr_idx, m_try, m_try,
                                     test_cal_upper[s_i], codec, uses_safesync_codec, is_stateless,
-                                    force_sparse, eff_2d_arith, eff_range,
+                                    force_sparse, eff_2d_arith, eff_range, False, superblock_safe,
                                 )
                                 if p_try["total_bits"] <= budget_bits:
                                     lo_s = mid_s
@@ -648,7 +649,7 @@ def evaluate_policy_on_scenes(
                         if encode_safesync_packet(
                             f"scene_{s_i}", pri_idx, eff_curr_idx, m_lo, safe_mask,
                             test_cal_upper[s_i], codec, uses_safesync_codec, is_stateless,
-                            force_sparse, eff_2d_arith, eff_range,
+                            force_sparse, eff_2d_arith, eff_range, False, superblock_safe,
                         )["total_bits"] > budget_bits:
                             hi_u = lo_u
                             lo_u = 0
@@ -658,7 +659,7 @@ def evaluate_policy_on_scenes(
                     p_hi = encode_safesync_packet(
                         f"scene_{s_i}", pri_idx, eff_curr_idx, m_hi, safe_mask,
                         test_cal_upper[s_i], codec, uses_safesync_codec, is_stateless,
-                        force_sparse, eff_2d_arith, eff_range,
+                        force_sparse, eff_2d_arith, eff_range, False, superblock_safe,
                     )
                     if p_hi["total_bits"] <= budget_bits:
                         lo_u = hi_u
@@ -670,7 +671,7 @@ def evaluate_policy_on_scenes(
                             p_try = encode_safesync_packet(
                                 f"scene_{s_i}", pri_idx, eff_curr_idx, m_try, safe_mask,
                                 test_cal_upper[s_i], codec, uses_safesync_codec, is_stateless,
-                                force_sparse, eff_2d_arith, eff_range,
+                                force_sparse, eff_2d_arith, eff_range, False, superblock_safe,
                             )
                             if p_try["total_bits"] <= budget_bits:
                                 lo_u = mid_u
@@ -682,7 +683,7 @@ def evaluate_policy_on_scenes(
             pkt_info = encode_safesync_packet(
                 f"scene_{s_i}", pri_idx, eff_curr_idx, sel_mask, safe_mask,
                 test_cal_upper[s_i], codec, uses_safesync_codec, is_stateless,
-                force_sparse, eff_2d_arith, eff_range,
+                force_sparse, eff_2d_arith, eff_range, False, superblock_safe,
             )
             if verify_wire_packets and s_i < 25:
                 dec_info = decode_safesync_packet(pkt_info["packet"], f"scene_{s_i}", pri_idx, codec)
@@ -690,7 +691,10 @@ def evaluate_policy_on_scenes(
                 expected_rec[sel_mask] = eff_curr_idx[sel_mask]
                 assert np.array_equal(dec_info["reconstructed_indices"], expected_rec), "Wire decode mismatch!"
                 assert np.array_equal(dec_info["selected_mask"], sel_mask), "Mask decode mismatch!"
-                assert np.array_equal(dec_info["safety_mask"], safe_mask), "Safety mask decode mismatch!"
+                if superblock_safe:
+                    assert np.all(dec_info["safety_mask"][safe_mask]), "Superblock safety mask superset mismatch!"
+                else:
+                    assert np.array_equal(dec_info["safety_mask"], safe_mask), "Safety mask decode mismatch!"
 
             if cache_out is not None:
                 cache_out["sel_masks"].append(sel_mask.copy())

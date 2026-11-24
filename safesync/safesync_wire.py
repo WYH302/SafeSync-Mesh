@@ -584,6 +584,7 @@ def encode_safesync_packet(
     use_2d_arith_mask: bool = True,
     use_range_ranks: bool = False,
     include_risk_bins: bool = False,
+    superblock_safe: bool = False,
 ) -> dict:
     """Serialize a SafeSync-Mesh update packet into verifiable bytes and return exact wire bit accounting."""
     sel_mask = np.asarray(selected_mask, dtype=bool).reshape(1024)
@@ -626,6 +627,17 @@ def encode_safesync_packet(
             risk_bin_bytes = b""
         if mask_mode == 1:
             safety_meta_bytes = risk_bin_bytes
+        elif superblock_safe:
+            # 4x4 super-block S_safe indicator (8x8 = 64 super-blocks, encoded only over active super-blocks!)
+            sb_active = sel_mask.reshape(8, 4, 8, 4).any(axis=(1, 3)).reshape(64)
+            sb_flags = safe_mask.reshape(8, 4, 8, 4).any(axis=(1, 3)).reshape(64)[sb_active].astype(np.int32)
+            raw_sb = pack_bits_to_bytes(np.ones(len(sb_flags), dtype=np.int32), sb_flags)
+            arith_sb = _encode_safe_flags_arith(sb_flags)
+            if len(arith_sb) + 1 < len(raw_sb) and len(arith_sb) <= 255:
+                safe_flag_arith = True
+                safety_meta_bytes = struct.pack("<B", len(arith_sb)) + arith_sb + risk_bin_bytes
+            else:
+                safety_meta_bytes = raw_sb + risk_bin_bytes
         else:
             sel_safe_flags = safe_mask[sel_positions].astype(np.int32)
             raw_sflag = pack_bits_to_bytes(np.ones(n_sel, dtype=np.int32), sel_safe_flags)
@@ -701,7 +713,8 @@ def encode_safesync_packet(
     )
     p_dig = prior_digest16(prior_indices, scene_id)
     crc = zlib.crc32(body) & 0xFFFFFFFF
-    hdr = PACKET_HDR.pack(MAGIC, 1, flags, p_dig, n_sel, n_safe, crc)
+    ver_num = 2 if (superblock_safe and mask_mode != 1) else 1
+    hdr = PACKET_HDR.pack(MAGIC, ver_num, flags, p_dig, n_sel, n_safe, crc)
     packet = hdr + body
 
     return {
@@ -728,7 +741,7 @@ def decode_safesync_packet(
     if len(packet) < PACKET_HDR.size:
         raise ValueError("packet shorter than header")
     magic, ver, flags, p_dig, n_sel, n_safe, crc = PACKET_HDR.unpack(packet[: PACKET_HDR.size])
-    if magic != MAGIC or ver != 1:
+    if magic != MAGIC or ver not in (1, 2):
         raise ValueError("invalid packet magic or version")
     if n_sel > 1024 or n_safe > n_sel:
         raise ValueError("invalid token count in header")
@@ -788,6 +801,25 @@ def decode_safesync_packet(
         if mask_mode == 1:
             safe_positions = np.sort(raw_positions[:n_safe])
             safe_mask[safe_positions] = True
+        elif ver == 2:
+            sel_bool_1024 = np.zeros(1024, dtype=bool)
+            sel_bool_1024[sel_positions] = True
+            sb_active = sel_bool_1024.reshape(8, 4, 8, 4).any(axis=(1, 3)).reshape(64)
+            n_sb_act = int(sb_active.sum())
+            if safe_flag_arith:
+                alen_s = body[offset]
+                offset += 1
+                sb_flags = _decode_safe_flags_arith(body[offset : offset + alen_s], n_sb_act)
+                offset += alen_s
+            else:
+                n_sb_bytes = (n_sb_act + 7) // 8
+                sb_flags = unpack_bits_from_bytes(body[offset : offset + n_sb_bytes], np.ones(n_sb_act, dtype=np.int32)).astype(bool)
+                offset += n_sb_bytes
+            sb_grid = np.zeros(64, dtype=bool)
+            sb_grid[sb_active] = sb_flags
+            sb_expanded = np.repeat(np.repeat(sb_grid.reshape(8, 8), 4, axis=0), 4, axis=1).reshape(1024)
+            safe_mask = sb_expanded & sel_bool_1024
+            safe_positions = np.flatnonzero(safe_mask).astype(np.int32)
         elif safe_flag_arith:
             alen_s = body[offset]
             offset += 1
