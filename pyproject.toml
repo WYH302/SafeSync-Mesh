@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "safesync-mesh"
 version = "2.0.0"
-description = "SafeSync-Mesh: Epistemic State Synchronization and Provenance-Idempotent Relay for Open-World LEO Satellite Constellations"
+description = "SafeSync-Mesh: Risk-Bounded Semantic Synchronization and Idempotent ISL Relaying for Cooperative LEO Earth-Observation Constellations"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
